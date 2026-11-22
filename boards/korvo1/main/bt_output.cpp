@@ -2,6 +2,11 @@
 // main/btspike.cpp, which proved the sequence on this board (find the headset by name in the EIR or
 // BDNAME, connect as A2DP source, stream from the data callback), and from ESP-IDF's
 // classic_bt/a2dp_source example.
+//
+// One task, the link task, owns the link: which headset, whether it is connected, the stream's
+// handshake and the retry deadlines. The GAP and A2DP callbacks (on the Bluetooth task) and
+// BtOutput::start() (on the logic thread) only post events to its queue, and its timeouts are the
+// queue's own wait, so every decision is taken on one thread, one event at a time.
 
 #include "bt_output.hpp"
 
@@ -13,7 +18,12 @@
 #include <esp_bt_main.h>
 #include <esp_err.h>
 #include <esp_gap_bt_api.h>
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/idf_additions.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 #include <nvs_flash.h>
 #include <sdkconfig.h>
 
@@ -23,6 +33,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -36,30 +47,28 @@ constexpr std::uint32_t kBytesPerFrame = 4;  // two interleaved 16-bit channels
 constexpr int kGainBits = 8;                 // the volume is a Q8 fraction of the samples: 256 is 1
 constexpr int kUnityGain = 1 << kGainBits;
 constexpr int kBondedList = 4;  // simplify: connect to the first of a handful of bonds
+constexpr std::int64_t kLinkRetryUs = 3'000'000;
+constexpr std::int64_t kStreamRetryUs = 500'000;
+constexpr std::uint32_t kLinkTaskStack = 6144;
+constexpr UBaseType_t kLinkTaskPriority = 5;
+constexpr UBaseType_t kQueueDepth = 32;
+constexpr TickType_t kPostWait = pdMS_TO_TICKS(100);
+constexpr std::size_t kNameBytes = 32;
 
-// Where the link is, for state_text().
-enum class State { off, scanning, connecting, connected };
+// Where the link is. waiting: nothing in flight, the next attempt is due in 3 s.
+enum class Link { waiting, scanning, connecting, connected };
 
-// What the three threads share: the player's ring with the data callback, and what the logic
-// thread asks of the Bluetooth stack. One headset, one instance: the ESP-IDF callbacks are plain
-// function pointers with no user context to pass.
+// What the link task shares with the other threads: the ring with the data callback, the link's
+// state and the headset's name with the logic thread. One headset, one instance: the ESP-IDF
+// callbacks are plain function pointers with no user context to pass.
 struct Shared {
   std::atomic<PcmRing*> ring{nullptr};       // what the callback pops from, while the player plays
   std::atomic<PcmRing*> last_ring{nullptr};  // the last one, so underruns() survives a pause
   std::atomic<bool> in_callback{false};      // the data callback is inside the ring
   std::atomic<int> gain{kUnityGain};
-
-  std::atomic<bool> connected{false};
-  std::atomic<bool> streaming{false};       // the media stream is running, and stays running
-  std::atomic<bool> starting{false};        // a START is in flight
-  std::atomic<bool> source_ready{false};    // CHECK_SRC_RDY was acknowledged
-  std::atomic<bool> checking_ready{false};  // a CHECK_SRC_RDY is in flight
-  std::atomic<bool> retried{false};         // the one retry of a refused START was used
-  std::atomic<esp_a2d_conn_hdl_t> handle{ESP_A2D_INVALID_CONN_HDL};
-
-  std::atomic<State> link{State::off};
-  std::atomic<std::uint32_t> revision{1};  // changes when state_text() would say something else
-  std::mutex text_mutex;                   // the name and the handler, never taken by the callback
+  std::atomic<Link> link{Link::waiting};     // written by the link task only
+  std::atomic<std::uint32_t> revision{1};    // changes when state_text() would say something else
+  std::mutex text_mutex;                     // the name and the handler, never taken by the callback
   std::string name;
   std::function<void(Button)> remote;
 };
@@ -70,34 +79,45 @@ void check(const char* call, esp_err_t err) {
   if (err != ESP_OK) std::printf("bt: %s failed: %s\n", call, esp_err_to_name(err));
 }
 
-void set_link(State next) {
-  shared.link = next;
-  shared.revision.fetch_add(1);
+std::int64_t now_us() { return esp_timer_get_time(); }
+
+// --- events: what the callbacks and the logic thread tell the link task -----------------------
+
+struct Event {
+  enum class Kind {
+    found,              // discovery saw the headset: address, name
+    discovery_stopped,  // finished, or cancelled
+    connected,          // A2DP is up: handle
+    disconnected,       // A2DP is down, or a connect went nowhere
+    audio_started,      // the media stream runs
+    audio_suspended,    // the headset suspended it
+    ack,                // a media command was answered: command, status
+    play,               // the player attached a ring
+  };
+  Kind kind = Kind::play;
+  esp_bd_addr_t address{};
+  char name[kNameBytes]{};  // null-terminated, possibly cut short
+  esp_a2d_conn_hdl_t handle = ESP_A2D_INVALID_CONN_HDL;
+  esp_a2d_media_ctrl_t command = ESP_A2D_MEDIA_CTRL_NONE;
+  esp_a2d_media_ctrl_ack_t status = ESP_A2D_MEDIA_CTRL_ACK_SUCCESS;
+};
+
+QueueHandle_t events = nullptr;
+
+Event event(Event::Kind kind) {
+  Event out;
+  out.kind = kind;
+  return out;
 }
 
-// The link's 3 s tick (one connect attempt or one discovery at a time) and one 500 ms retry of a
-// refused START. Both run on the esp_timer task, never on the Bluetooth task.
-constexpr std::uint64_t kLinkTickUs = 3'000'000;
-constexpr std::uint64_t kStreamRetryUs = 500'000;
-
-esp_timer_handle_t link_timer = nullptr;
-esp_timer_handle_t stream_timer = nullptr;
-
-esp_timer_handle_t open_timer(esp_timer_cb_t callback, const char* name) {
-  esp_timer_create_args_t args{};
-  args.callback = callback;
-  args.arg = nullptr;
-  args.dispatch_method = ESP_TIMER_TASK;
-  args.name = name;
-  esp_timer_handle_t timer = nullptr;
-  check("esp_timer_create", esp_timer_create(&args, &timer));
-  return timer;
+// Bounded wait: the Bluetooth task must not block for good on a full queue while the link task
+// waits on the Bluetooth task.
+void post(const Event& e) {
+  if (events && xQueueSend(events, &e, kPostWait) == pdTRUE) return;
+  std::printf("bt: event %d dropped\n", static_cast<int>(e.kind));
 }
 
-// --- discovery -------------------------------------------------------------------------------
-
-esp_bd_addr_t peer{};
-bool peer_found = false;
+// --- the callbacks: read the parameters, post an event, decide nothing -----------------------
 
 std::string_view eir_name(std::uint8_t* eir) {
   std::uint8_t length = 0;
@@ -120,191 +140,304 @@ bool is_target(const esp_bt_gap_cb_param_t::disc_res_param& found) {
 }
 
 // The whole name, which may be longer than the part we matched on: "Connected to <name>".
-void remember_name(const esp_bt_gap_cb_param_t::disc_res_param& found) {
+Event found_event(const esp_bt_gap_cb_param_t::disc_res_param& found) {
+  auto out = event(Event::Kind::found);
+  std::memcpy(out.address, found.bda, ESP_BD_ADDR_LEN);
   for (int i = 0; i < found.num_prop; ++i) {
     const auto name = property_name(found.prop[i]);
     if (name.empty()) continue;
-    const std::lock_guard lock(shared.text_mutex);
-    shared.name = std::string{name};
-    shared.revision.fetch_add(1);
-    return;
+    name.copy(out.name, std::min(name.size(), kNameBytes - 1));
+    break;
   }
+  return out;
 }
 
-void start_discovery();
-
-void on_device_found(const esp_bt_gap_cb_param_t::disc_res_param& found) {
-  if (!is_target(found)) return;
-  std::memcpy(peer, found.bda, ESP_BD_ADDR_LEN);
-  peer_found = true;
-  remember_name(found);
-  check("esp_bt_gap_cancel_discovery", esp_bt_gap_cancel_discovery());
-}
-
-void on_discovery_stopped() {
-  if (!peer_found) return start_discovery();  // nothing matched yet: look again
-  set_link(State::connecting);
-  if (const auto err = esp_a2d_source_connect(peer); err != ESP_OK) {
-    check("esp_a2d_source_connect", err);
-    start_discovery();
-  }
-}
-
-// Discovery, unless the radio is busy with something else: the tick retries it in 3 s.
-void start_discovery() {
-  peer_found = false;
-  set_link(State::scanning);
-  check("esp_bt_gap_start_discovery",
-        esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0));
-}
-
-void gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t* param) {
-  switch (event) {
+void gap_callback(esp_bt_gap_cb_event_t event_id, esp_bt_gap_cb_param_t* param) {
+  switch (event_id) {
     case ESP_BT_GAP_DISC_RES_EVT:
-      if (shared.link == State::scanning) on_device_found(param->disc_res);
+      if (is_target(param->disc_res)) post(found_event(param->disc_res));
       break;
     case ESP_BT_GAP_DISC_STATE_CHANGED_EVT:
-      if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) on_discovery_stopped();
+      if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED)
+        post(event(Event::Kind::discovery_stopped));
       break;
     case ESP_BT_GAP_CFM_REQ_EVT: esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true); break;
     default: break;
   }
 }
 
-// A bonded headset connects without discovery. False: none bonded, or the connect was refused.
-bool connect_bonded() {
-  const int count = esp_bt_gap_get_bond_device_num();
-  if (count <= 0) return false;
-  esp_bd_addr_t bonded[kBondedList]{};
-  int listed = std::min(count, kBondedList);  // in: how many fit, out: how many came back
-  if (esp_bt_gap_get_bond_device_list(&listed, bonded) != ESP_OK || listed <= 0) return false;
-  std::memcpy(peer, bonded[0], ESP_BD_ADDR_LEN);
-  peer_found = true;
-  set_link(State::connecting);
-  if (const auto err = esp_a2d_source_connect(peer); err != ESP_OK) {
-    check("esp_a2d_source_connect", err);
-    return false;
+void post_connection(const esp_a2d_cb_param_t::a2d_conn_stat_param& connection) {
+  if (connection.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+    auto e = event(Event::Kind::connected);
+    e.handle = connection.conn_hdl;
+    post(e);
+  } else if (connection.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+    post(event(Event::Kind::disconnected));
   }
+}
+
+void post_audio_state(esp_a2d_audio_state_t state) {
+  post(event(state == ESP_A2D_AUDIO_STATE_STARTED ? Event::Kind::audio_started
+                                                   : Event::Kind::audio_suspended));
+}
+
+void post_ack(const esp_a2d_cb_param_t::media_ctrl_stat_param& ack) {
+  auto e = event(Event::Kind::ack);
+  e.command = ack.cmd;
+  e.status = ack.status;
+  post(e);
+}
+
+void a2d_callback(esp_a2d_cb_event_t event_id, esp_a2d_cb_param_t* param) {
+  switch (event_id) {
+    case ESP_A2D_CONNECTION_STATE_EVT: post_connection(param->conn_stat); break;
+    case ESP_A2D_AUDIO_STATE_EVT: post_audio_state(param->audio_stat.state); break;
+    case ESP_A2D_MEDIA_CTRL_ACK_EVT: post_ack(param->media_ctrl_stat); break;
+    default: break;
+  }
+}
+
+// --- the link task ---------------------------------------------------------------------------
+
+// The first bonded headset, or false when nothing is bonded. Reads bluedroid's in-memory bond
+// table: no flash access, so it is safe on a task whose stack is in PSRAM.
+bool bonded_address(esp_bd_addr_t out) {
+  if (esp_bt_gap_get_bond_device_num() <= 0) return false;
+  esp_bd_addr_t bonded[kBondedList]{};
+  int listed = kBondedList;  // in: how many fit, out: how many came back
+  if (esp_bt_gap_get_bond_device_list(&listed, bonded) != ESP_OK || listed <= 0) return false;
+  std::memcpy(out, bonded[0], ESP_BD_ADDR_LEN);
   return true;
 }
 
-void on_link_tick(void*);
-
-void start_link_tick() {
-  if (!link_timer) link_timer = open_timer(on_link_tick, "bt link");
-  if (link_timer && !esp_timer_is_active(link_timer))
-    check("esp_timer_start_periodic", esp_timer_start_periodic(link_timer, kLinkTickUs));
+void remember_name(const char* name) {
+  if (name[0] == '\0') return;
+  const std::lock_guard lock(shared.text_mutex);
+  shared.name = name;
+  shared.revision.fetch_add(1);
 }
 
-void stop_link_tick() {
-  if (link_timer && esp_timer_is_active(link_timer)) esp_timer_stop(link_timer);
-}
+// The media stream's handshake on the current connection: CHECK_SRC_RDY acked, then START.
+// Once started it stays running across pauses and track changes (stop() never suspends it): the
+// stack acks a START sent right after a SUSPEND as busy.
+struct Stream {
+  bool ready = false;      // CHECK_SRC_RDY was acked
+  bool checking = false;   // a CHECK_SRC_RDY is in flight
+  bool starting = false;   // a START is in flight
+  bool streaming = false;  // the headset says the stream runs (audio state), or acked our START
+  bool retried = false;    // the one 500 ms retry of a refused command was used
+};
 
-// One attempt at a time, every 3 s while nothing is connected: the bonded headset when there is one
-// (it is connectable even when it is not discoverable), discovery when there is not. A connect that
-// goes nowhere comes back as a disconnect, so this is also the retry loop.
-void on_link_tick(void*) {
-  if (shared.link == State::connected || shared.link == State::connecting) return;
-  if (!connect_bonded()) start_discovery();
-}
-
-// --- the stream ------------------------------------------------------------------------------
-
-void start_media() {
-  if (shared.starting.exchange(true)) return;  // one START at a time
-  const auto err = esp_a2d_media_ctrl_by_handle(shared.handle.load(), ESP_A2D_MEDIA_CTRL_START);
-  if (err == ESP_OK) return;
-  check("esp_a2d_media_ctrl_by_handle START", err);
-  shared.starting = false;
-}
-
-// The spike's order: the source must be acknowledged ready before the stream starts. Once started
-// the stream stays running -- stop() does not suspend it -- because the stack acks a START sent
-// right after a SUSPEND as busy and never sends it again.
-void request_stream() {
-  if (shared.handle.load() == ESP_A2D_INVALID_CONN_HDL) return;
-  if (!shared.source_ready) {
-    if (shared.checking_ready.exchange(true)) return;  // its ack takes it from here
-    check("esp_a2d_media_ctrl_by_handle CHECK_SRC_RDY",
-          esp_a2d_media_ctrl_by_handle(shared.handle.load(), ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY));
-    return;
+// All of the link's state, touched only on the link task, one event at a time. Each handler
+// starts by saying in which states it acts; in any other it does nothing.
+class LinkManager {
+public:
+  void handle(const Event& e) {
+    switch (e.kind) {
+      case Event::Kind::found: return on_found(e);
+      case Event::Kind::discovery_stopped: return on_discovery_stopped();
+      case Event::Kind::connected: return on_connected(e.handle);
+      case Event::Kind::disconnected: return on_disconnected();
+      case Event::Kind::audio_started: return on_audio_started();
+      case Event::Kind::audio_suspended: return on_audio_suspended();
+      case Event::Kind::ack: return on_ack(e.command, e.status);
+      case Event::Kind::play: return on_play();
+    }
   }
-  if (shared.streaming || shared.starting) return;  // already running, or on its way
-  if (!shared.ring.load()) return;                  // ready, but nothing to play yet
-  start_media();
-}
 
-void retry_stream(void*) {
-  shared.starting = false;
-  request_stream();
-}
+  // The first attempt, at boot.
+  void begin() { attempt(); }
 
-// A START the stack refused is never resent: try the check-ready/START sequence once more, half a
-// second later. simplify: one retry per connection; a headset that keeps refusing needs a reconnect.
-void schedule_stream_retry() {
-  if (shared.retried.exchange(true)) return;
-  if (!stream_timer) stream_timer = open_timer(retry_stream, "bt stream");
-  if (stream_timer)
-    check("esp_timer_start_once", esp_timer_start_once(stream_timer, kStreamRetryUs));
-}
+  std::optional<std::int64_t> next_deadline() const {
+    if (link_retry_at_ && stream_retry_at_) return std::min(*link_retry_at_, *stream_retry_at_);
+    return link_retry_at_ ? link_retry_at_ : stream_retry_at_;
+  }
 
-void on_media_ack(const esp_a2d_cb_param_t::media_ctrl_stat_param& ack) {
-  if (ack.cmd == ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY) {
-    shared.checking_ready = false;
-    if (ack.status != ESP_A2D_MEDIA_CTRL_ACK_SUCCESS) {
-      std::printf("bt: source check ack %d\n", static_cast<int>(ack.status));
+  void fire_due(std::int64_t now) {
+    if (link_retry_at_ && *link_retry_at_ <= now) attempt();
+    if (stream_retry_at_ && *stream_retry_at_ <= now) {
+      stream_retry_at_.reset();
+      request_stream();
+    }
+  }
+
+private:
+  void set_link(Link next) {
+    link_ = next;
+    shared.link = next;
+    shared.revision.fetch_add(1);
+  }
+
+  void wait_then_retry() {
+    set_link(Link::waiting);
+    link_retry_at_ = now_us() + kLinkRetryUs;
+  }
+
+  // One attempt: the bonded headset when there is one (connectable even when not discoverable),
+  // discovery only when nothing is bonded. A failure of either waits 3 s for the next one.
+  void attempt() {
+    link_retry_at_.reset();
+    if (bonded_address(peer_)) return connect_peer();
+    start_discovery();
+  }
+
+  void connect_peer() {
+    set_link(Link::connecting);
+    const auto err = esp_a2d_source_connect(peer_);
+    if (err == ESP_OK) return;
+    check("esp_a2d_source_connect", err);
+    wait_then_retry();
+  }
+
+  void start_discovery() {
+    peer_found_ = false;
+    set_link(Link::scanning);
+    const auto err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+    if (err == ESP_OK) return;
+    check("esp_bt_gap_start_discovery", err);
+    wait_then_retry();
+  }
+
+  void on_found(const Event& e) {
+    if (link_ != Link::scanning || peer_found_) return;
+    std::memcpy(peer_, e.address, ESP_BD_ADDR_LEN);
+    peer_found_ = true;
+    remember_name(e.name);
+    check("esp_bt_gap_cancel_discovery", esp_bt_gap_cancel_discovery());
+  }
+
+  // Connect only once the inquiry is over: the radio does one thing at a time.
+  void on_discovery_stopped() {
+    if (link_ != Link::scanning) return;
+    if (peer_found_) return connect_peer();
+    attempt();  // nothing matched: look again (or connect, should a bond have appeared)
+  }
+
+  // Ours, or the headset's own: it may come back by itself while we scan or wait.
+  void on_connected(esp_a2d_conn_hdl_t handle) {
+    if (link_ == Link::scanning)
+      check("esp_bt_gap_cancel_discovery", esp_bt_gap_cancel_discovery());
+    handle_ = handle;
+    reset_stream();
+    link_retry_at_.reset();
+    set_link(Link::connected);
+    request_stream();
+  }
+
+  // Only a connect we made, or the connection we had, ending: a failed incoming connect while
+  // we scan or wait changes nothing.
+  void on_disconnected() {
+    if (link_ != Link::connecting && link_ != Link::connected) return;
+    handle_ = ESP_A2D_INVALID_CONN_HDL;
+    reset_stream();
+    wait_then_retry();
+  }
+
+  void reset_stream() {
+    stream_ = {};
+    stream_retry_at_.reset();
+  }
+
+  void on_audio_started() {
+    stream_.starting = false;
+    stream_.streaming = true;
+    stream_.retried = false;
+  }
+
+  // The headset suspended the stream: start it again if the player is playing.
+  void on_audio_suspended() {
+    stream_.streaming = false;
+    request_stream();
+  }
+
+  // Each play gets its own retry of a refused START.
+  void on_play() {
+    stream_.retried = false;
+    request_stream();
+  }
+
+  void on_ack(esp_a2d_media_ctrl_t command, esp_a2d_media_ctrl_ack_t status) {
+    if (link_ != Link::connected) return;  // an answer from a connection that is gone
+    const bool ok = status == ESP_A2D_MEDIA_CTRL_ACK_SUCCESS;
+    if (command == ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY) {
+      stream_.checking = false;
+      stream_.ready = ok;
+    } else if (command == ESP_A2D_MEDIA_CTRL_START) {
+      stream_.starting = false;
+      stream_.streaming = stream_.streaming || ok;
+    } else {
       return;
     }
-    shared.source_ready = true;
-    request_stream();
-    return;
+    if (ok) return request_stream();
+    std::printf("bt: media command %d ack %d\n", static_cast<int>(command), static_cast<int>(status));
+    schedule_stream_retry();
   }
-  if (ack.cmd != ESP_A2D_MEDIA_CTRL_START) return;
-  shared.starting = false;
-  if (ack.status == ESP_A2D_MEDIA_CTRL_ACK_SUCCESS) {
-    shared.streaming = true;
-    return;
+
+  // The spike's order: the source must be acknowledged ready before the stream starts, and the
+  // stream starts once a ring is attached. One command in flight at a time.
+  void request_stream() {
+    if (link_ != Link::connected) return;
+    if (stream_.checking || stream_.starting || stream_.streaming) return;
+    if (!stream_.ready) return send_media(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY, stream_.checking);
+    if (shared.ring.load()) send_media(ESP_A2D_MEDIA_CTRL_START, stream_.starting);
   }
-  std::printf("bt: media start ack %d\n", static_cast<int>(ack.status));
-  schedule_stream_retry();
+
+  void send_media(esp_a2d_media_ctrl_t command, bool& in_flight) {
+    stream_retry_at_.reset();
+    const auto err = esp_a2d_media_ctrl_by_handle(handle_, command);
+    if (err == ESP_OK) {
+      in_flight = true;
+      return;
+    }
+    check("esp_a2d_media_ctrl_by_handle", err);
+    schedule_stream_retry();
+  }
+
+  // A refused command is never resent by the stack: try once more, half a second later.
+  // simplify: one retry per play (or connection); a headset that keeps refusing needs the next
+  // play or a reconnect.
+  void schedule_stream_retry() {
+    if (stream_.retried) return;
+    stream_.retried = true;
+    stream_retry_at_ = now_us() + kStreamRetryUs;
+  }
+
+  Link link_ = Link::waiting;
+  esp_bd_addr_t peer_{};
+  bool peer_found_ = false;  // discovery saw the headset: connect when the inquiry stops
+  esp_a2d_conn_hdl_t handle_ = ESP_A2D_INVALID_CONN_HDL;
+  Stream stream_;
+  std::optional<std::int64_t> link_retry_at_;    // set only while waiting
+  std::optional<std::int64_t> stream_retry_at_;  // set only while connected
+};
+
+// The queue's wait is the timer: at most one tick late, never a busy loop.
+TickType_t ticks_until(std::optional<std::int64_t> deadline) {
+  if (!deadline) return portMAX_DELAY;
+  const auto left_us = *deadline - now_us();
+  if (left_us <= 0) return 0;
+  return pdMS_TO_TICKS(left_us / 1000) + 1;
 }
 
-void on_connected(esp_a2d_conn_hdl_t handle) {
-  shared.handle = handle;
-  shared.connected = true;
-  shared.source_ready = false;
-  shared.checking_ready = false;
-  shared.streaming = false;
-  shared.starting = false;
-  shared.retried = false;
-  set_link(State::connected);
-  stop_link_tick();  // the headset is here: no more attempts
-  request_stream();
-}
-
-void on_disconnected() {
-  shared.connected = false;
-  shared.handle = ESP_A2D_INVALID_CONN_HDL;
-  shared.source_ready = false;
-  shared.checking_ready = false;
-  shared.streaming = false;
-  shared.starting = false;
-  shared.retried = false;
-  set_link(State::off);
-  start_link_tick();  // every 3 s from here, on the timer task: never from inside this callback
-}
-
-void a2d_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param) {
-  switch (event) {
-    case ESP_A2D_CONNECTION_STATE_EVT:
-      if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED)
-        on_connected(param->conn_stat.conn_hdl);
-      else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED)
-        on_disconnected();
-      break;
-    case ESP_A2D_MEDIA_CTRL_ACK_EVT: on_media_ack(param->media_ctrl_stat); break;
-    default: break;
+void run_link_task(void*) {
+  LinkManager link;
+  link.begin();
+  for (;;) {
+    Event e;
+    if (xQueueReceive(events, &e, ticks_until(link.next_deadline())) == pdTRUE) link.handle(e);
+    link.fire_due(now_us());
   }
+}
+
+// PSRAM for the stack, as the logic thread's: the task calls the Bluetooth API, which only posts
+// to the Bluetooth task and reads RAM, never flash (ESP-IDF's rule for PSRAM stacks: no code that
+// disables the cache, see api-guides/external-ram).
+void start_link_task() {
+  TaskHandle_t task = nullptr;
+  if (xTaskCreatePinnedToCoreWithCaps(run_link_task, "bt link", kLinkTaskStack, nullptr,
+                                      kLinkTaskPriority, &task, 0,
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS)
+    std::printf("bt: cannot start the link task\n");
 }
 
 // The Bluetooth task, a buffer of ~100 frames at a time: pop, scale, hand the bytes back. Nothing
@@ -398,13 +531,14 @@ void start_profiles() {
         esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_NON_DISCOVERABLE));
 }
 
+// The queue first: the callbacks may post as soon as they are registered.
 void start_bluetooth() {
+  events = xQueueCreate(kQueueDepth, sizeof(Event));
   init_flash();
   start_bluedroid();
   korvo1::print_internal_heap("after bluedroid");
   start_profiles();
-  on_link_tick(nullptr);  // the first attempt, now
-  start_link_tick();      // and every 3 s while nothing is connected
+  start_link_task();  // the first attempt, now, and every retry from there
 }
 
 }  // namespace
@@ -424,20 +558,20 @@ bool BtOutput::start(PcmFormat format, PcmRing& ring) {
   if (!accepts(format)) return false;
   shared.last_ring = &ring;
   shared.ring = &ring;
-  request_stream();  // starts the stream if it is not running yet, else it keeps running
+  post(event(Event::Kind::play));  // the link task starts the stream if it is not running yet
   return true;
 }
 
 // core/audio.hpp: the player clears the ring once this returns, so the callback must be out of it
 // and unable to reach it again. It never blocks, so the spin is one buffer long at most.
-// The stream itself keeps running: it sends silence while no ring is attached (see request_stream).
+// The stream itself keeps running: it sends silence while no ring is attached (see Stream).
 void BtOutput::stop() {
   shared.ring = nullptr;
   while (shared.in_callback) {
   }
 }
 
-bool BtOutput::connected() const { return shared.connected; }
+bool BtOutput::connected() const { return shared.link == Link::connected; }
 
 std::uint32_t BtOutput::underruns() const {
   auto* ring = shared.ring.load();  // the last attached one when the player is paused
@@ -462,10 +596,10 @@ void BtOutput::on_remote(std::function<void(Button)> handler) {
 
 std::string BtOutput::state_text() const {
   switch (shared.link.load()) {
-    case State::off: return "Off";
-    case State::scanning: return "Scanning…";
-    case State::connecting: return "Connecting…";
-    case State::connected: break;
+    case Link::waiting: return "Off";
+    case Link::scanning: return "Scanning…";
+    case Link::connecting: return "Connecting…";
+    case Link::connected: break;
   }
   const std::lock_guard lock(shared.text_mutex);
   return "Connected to " + (shared.name.empty() ? std::string{kTargetName} : shared.name);
