@@ -1,5 +1,7 @@
 #include "core/tags.hpp"
 
+#include "prism/core/utf8.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <optional>
@@ -14,6 +16,7 @@ using Bytes = std::span<const std::byte>;
 constexpr std::size_t kHeaderSize = 10;
 constexpr std::uint64_t kMaxTagRead = 1 << 20;
 constexpr std::size_t kV1Size = 128;
+constexpr std::size_t kMaxFieldBytes = 256;
 
 unsigned u8(std::byte b) { return std::to_integer<unsigned>(b); }
 
@@ -55,27 +58,11 @@ std::string latin1_to_utf8(Bytes b) {
   return out;
 }
 
-std::size_t utf8_sequence_length(Bytes b) {
-  const auto lead = u8(b[0]);
-  const std::size_t n = lead < 0x80 ? 1 : (lead >> 5) == 6 ? 2 : (lead >> 4) == 14 ? 3 : (lead >> 3) == 30 ? 4 : 0;
-  if (n == 0 || n > b.size()) return 0;
-  const bool continuations = std::ranges::all_of(b.subspan(1, n - 1), [](std::byte x) { return (u8(x) >> 6) == 2; });
-  return continuations ? n : 0;
-}
-
-bool is_valid_utf8(Bytes b) {
-  while (!b.empty()) {
-    const auto n = utf8_sequence_length(b);
-    if (n == 0) return false;
-    b = b.subspan(n);
-  }
-  return true;
-}
-
 std::string utf8_or_latin1(Bytes b) {
-  if (!is_valid_utf8(b)) return latin1_to_utf8(b);
   const auto* p = reinterpret_cast<const char*>(b.data());
-  return {p, b.size()};
+  const std::string_view raw{p, b.size()};
+  const auto text = raw.substr(0, raw.find('\0'));
+  return prism::core::utf8::sanitize(text) == text ? std::string{text} : latin1_to_utf8(b);
 }
 
 std::string utf16_to_utf8(Bytes b, bool big_endian) {
@@ -123,9 +110,14 @@ std::string up_to_nul(std::string s) {
   return s;
 }
 
+std::string capped(std::string s) {
+  s.resize(prism::core::utf8::snap(s, kMaxFieldBytes));
+  return s;
+}
+
 std::optional<std::string> text_frame_value(Bytes body) {
   if (body.empty()) return std::nullopt;
-  return decode_text(u8(body[0]), body.subspan(1)).transform(up_to_nul);
+  return decode_text(u8(body[0]), body.subspan(1)).transform(up_to_nul).transform(capped);
 }
 
 int leading_number(const std::string& s) {
@@ -169,8 +161,27 @@ FrameFlags frame_flags(int version, Bytes flags) {
   return {(format & 0xc0) != 0, false};
 }
 
-std::optional<std::uint32_t> frame_size(int version, Bytes size_bytes) {
-  return version == 4 ? synchsafe(size_bytes) : std::optional{be32(size_bytes)};
+bool is_frame_id(Bytes id) {
+  return std::ranges::all_of(id.first(4), [](std::byte b) {
+    const auto c = u8(b);
+    return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+  });
+}
+
+bool frame_boundary(Bytes tag, std::size_t pos) {
+  return pos + kHeaderSize > tag.size() || u8(tag[pos]) == 0 || is_frame_id(tag.subspan(pos, 4));
+}
+
+// Old iTunes wrote plain sizes in v2.4 tags: the synchsafe reading is kept only when it lands on a frame.
+std::optional<std::uint32_t> frame_size(int version, Bytes tag, std::size_t pos) {
+  const auto size_bytes = tag.subspan(pos + 4, 4);
+  const auto body_start = pos + kHeaderSize;
+  const auto fits = [&](std::uint32_t s) { return s <= tag.size() - body_start; };
+  const auto synchsafe_size = version == 4 ? synchsafe(size_bytes) : std::nullopt;
+  if (synchsafe_size && fits(*synchsafe_size) && frame_boundary(tag, body_start + *synchsafe_size))
+    return synchsafe_size;
+  const auto plain = be32(size_bytes);
+  return fits(plain) ? std::optional{plain} : std::nullopt;
 }
 
 std::size_t extended_header_size(int version, Bytes tag) {
@@ -182,9 +193,9 @@ std::size_t extended_header_size(int version, Bytes tag) {
 std::vector<Frame> split_frames(int version, Bytes tag, std::size_t start) {
   std::vector<Frame> frames;
   for (auto pos = start; pos + kHeaderSize <= tag.size() && u8(tag[pos]) != 0;) {
-    const auto size = frame_size(version, tag.subspan(pos + 4, 4));
+    const auto size = frame_size(version, tag, pos);
     const auto body_start = pos + kHeaderSize;
-    if (!size || *size > tag.size() - body_start) break;
+    if (!size) break;
     const auto flags = frame_flags(version, tag.subspan(pos + 8, 2));
     const auto skip = flags.has_data_length ? std::min<std::size_t>(4, *size) : 0;
     const auto id = latin1_to_utf8(tag.subspan(pos, 4));
@@ -219,7 +230,7 @@ struct V2Header {
 std::optional<V2Header> parse_v2_header(Bytes h) {
   const bool is_id3 = h[0] == std::byte{'I'} && h[1] == std::byte{'D'} && h[2] == std::byte{'3'};
   const auto size = synchsafe(h.subspan(6, 4));
-  if (!is_id3 || !size || (u8(h[3]) != 3 && u8(h[3]) != 4)) return std::nullopt;
+  if (!is_id3 || !size) return std::nullopt;
   return V2Header{static_cast<int>(u8(h[3])), static_cast<std::uint8_t>(u8(h[5])), *size};
 }
 
@@ -236,10 +247,13 @@ std::uint64_t v2_audio_offset(File& f, const V2Header& h) {
 Tags tags_from_v2(File& f, const V2Header& h) {
   Tags t;
   t.audio_offset = v2_audio_offset(f, h);
+  // simplify: only v2.3 and v2.4 frames are read (v2.2 has 3-character frame IDs); add v2.2 if real files need it.
+  if (h.version != 3 && h.version != 4) return t;
   // simplify: a tag-wide unsynchronisation flag means no frames are read; undo it when real files need it.
   if (h.flags & 0x80) return t;
+  if (h.size > f.size() - kHeaderSize) return t;
   const auto tag = read_exact(f, kHeaderSize, std::min<std::uint64_t>(h.size, kMaxTagRead));
-  if (!tag || h.size > f.size() - kHeaderSize) return t;
+  if (!tag) return t;
   const auto start = (h.flags & 0x40) ? extended_header_size(h.version, *tag) : 0;
   for (const auto& frame : split_frames(h.version, *tag, start)) apply_frame(t, frame, kHeaderSize);
   return t;
@@ -279,6 +293,12 @@ std::string_view without_extension(std::string_view name) {
   return dot == 0 || dot == std::string_view::npos ? name : name.substr(0, dot);
 }
 
+std::string filename_title(std::string_view file_name) {
+  const auto base = without_extension(file_name);
+  const Bytes raw{reinterpret_cast<const std::byte*>(base.data()), base.size()};
+  return capped(utf8_or_latin1(raw));
+}
+
 Tags parse(File& f) {
   const auto header = any_v2_header(f);
   auto tags = header ? tags_from_v2(f, *header) : Tags{};
@@ -296,7 +316,7 @@ Tags read_tags(File& file, std::string_view file_name) {
   } catch (...) {
     tags = Tags{};
   }
-  if (tags.title.empty()) tags.title = std::string{without_extension(file_name)};
+  if (tags.title.empty()) tags.title = filename_title(file_name);
   return tags;
 }
 
