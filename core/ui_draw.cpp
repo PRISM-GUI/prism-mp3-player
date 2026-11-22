@@ -179,7 +179,8 @@ void PlayerUi::draw_title(const Pen& pen) const {
 void PlayerUi::draw_menu(const Pen& pen) const {
   const auto& p = here();
   const auto rows = menu_rows(p.screen);
-  if (rows.empty()) return centred_note(pen, 110, library_status_.empty() ? "No music" : library_status_);
+  const auto note = [&] { return library_status_.empty() ? std::string{"No music"} : library_status_; };
+  if (rows.empty()) return centred_note(pen, 110, note());
   const bool opens = p.screen != Screen::Settings;
   for (std::size_t i = p.top; i < std::min(rows.size(), p.top + kVisibleRows); ++i) {
     Row row{rows[i], {}};
@@ -188,6 +189,8 @@ void PlayerUi::draw_menu(const Pen& pen) const {
     if (p.screen == Screen::Music && i == 0 && !storage_) row.value = "No SD card";
     draw_row(pen, pen.width, i - p.top, i == p.selected, row, opens);
   }
+  // Folders sits above the note: the card is browsable while the index is missing or being rebuilt.
+  if (p.screen == Screen::Music && !has_music()) centred_note(pen, row_top(rows.size()) + 4, note());
   if (p.screen == Screen::Settings)
     text(pen.dl, "The output changes at the next start.", kPad, row_top(3), kSmallText, kGreyInk);
 }
@@ -218,9 +221,13 @@ std::vector<PlayerUi::Row> PlayerUi::visible_rows() const {
 
 void PlayerUi::draw_list(const Pen& pen) const {
   const auto& p = here();
-  const bool opens = p.screen == Screen::List && !is_song_view(p.key.view);
+  // A list opens when it holds views; a folder row opens when it is a subfolder, told by its '/'.
+  const bool list_opens = p.screen == Screen::List && !is_song_view(p.key.view);
   const auto rows = visible_rows();
-  for (std::size_t i = 0; i < rows.size(); ++i) draw_row(pen, pen.width - 6, i, p.top + i == p.selected, rows[i], opens);
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    const bool opens = p.screen == Screen::Folders ? rows[i].label.ends_with('/') : list_opens;
+    draw_row(pen, pen.width - 6, i, p.top + i == p.selected, rows[i], opens);
+  }
 }
 
 void PlayerUi::draw_now_playing(const Pen& pen) const {

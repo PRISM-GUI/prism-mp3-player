@@ -146,6 +146,22 @@ std::pair<const prism::render::TextCmd*, std::optional<Rect>> text_and_clip(cons
 
 float right_of(Rect r) { return r.origin.x.raw() + r.extent.w.raw(); }
 
+// A card whose one file cannot be opened, the way a damaged one behaves: the listing still has it.
+class MissingFileStorage final : public Storage {
+public:
+  MissingFileStorage(Storage& inner, std::string missing) : inner_(inner), missing_(std::move(missing)) {}
+  std::vector<DirEntry> list(std::string_view dir) override { return inner_.list(dir); }
+  std::unique_ptr<File> open(std::string_view path) override {
+    return path == missing_ ? nullptr : inner_.open(path);
+  }
+  std::unique_ptr<std::ostream> create(std::string_view path) override { return inner_.create(path); }
+  bool rename(std::string_view from, std::string_view to) override { return inner_.rename(from, to); }
+
+private:
+  Storage& inner_;
+  std::string missing_;
+};
+
 struct Six {
   MemoryStorage memory;
   CountingStorage storage{memory};
@@ -225,6 +241,7 @@ TEST_CASE("Folders lists subfolders then mp3 files, sorted, skipping system fold
   s.add("/Album/zeta.mp3", fake_audio(16));
   s.add("/Album/Beta.mp3", fake_audio(16));
   s.add("/Album/alpha.mp3", fake_audio(16));
+  s.add("/Album/Gamma.MP3", fake_audio(16));  // upper case: still a song
   s.add("/Album/Sub/deep.mp3", fake_audio(16));
   s.add("/Album/System Volume Information/junk.mp3", fake_audio(16));
   s.add("/Album/$RECYCLE.BIN/junk.mp3", fake_audio(16));
@@ -241,7 +258,8 @@ TEST_CASE("Folders lists subfolders then mp3 files, sorted, skipping system fold
 
   press(ui, {Button::Select});
   CHECK(ui.screen_title() == "Album");
-  CHECK(texts(ui) == std::vector<std::string>{"Album", "Sub/", "alpha.mp3", "Beta.mp3", "zeta.mp3"});
+  CHECK(texts(ui) ==
+        std::vector<std::string>{"Album", "Sub/", "alpha.mp3", "Beta.mp3", "Gamma.MP3", "zeta.mp3"});
 }
 
 TEST_CASE("Select enters a folder; Menu goes back and keeps the selection") {
@@ -291,9 +309,12 @@ TEST_CASE("Select on a file plays its folder from that file") {
 }
 
 TEST_CASE("a folder of 2,000 files queues a window around the selected file") {
-  MemoryStorage s;
+  MemoryStorage memory;
+  const auto sine = load("sine440_44k.mp3");
   for (int n = 0; n < 2000; ++n)
-    add_song(s, std::format("/huge/{:04}.mp3", n), std::format("Track {:04}", n), "Band", "Huge", n + 1);
+    add_song(memory, std::format("/huge/{:04}.mp3", n), std::format("Track {:04}", n), "Band", "Huge", n + 1,
+             n == 1000 ? sine : fake_audio(16));
+  CountingStorage s{memory};
   FakeOutput out;
   Player player{s, out};
   PlayerUi ui{nullptr, player};
@@ -303,9 +324,102 @@ TEST_CASE("a folder of 2,000 files queues a window around the selected file") {
   REQUIRE(ui.screen_title() == "huge");
   press(ui, {Rotate{1000}, Button::Select});
   REQUIRE(player.queue_size() == 500);
-  CHECK(player.queue().front().title == "Track 0750");
-  CHECK(player.queue()[250].title == "Track 1000");  // the selected file, in the middle
-  CHECK(player.queue().back().title == "Track 1249");
+  CHECK(player.queue().front().title == "0750");  // far from the selection: named by its file
+  CHECK(player.queue()[250].title == "Track 1000");  // the selected file, in the middle: tags read
+  CHECK(player.queue().back().title == "1249");
+  CHECK(player.status().index == 250);
+  // The 32 files around the selection are read for their tags, and no file before them is opened at
+  // all. Past the window the player opens whatever it chains into to fill its ring, so only the
+  // window itself can be pinned down.
+  const auto was_opened = [&s](int n) {
+    const auto path = std::format("/huge/{:04}.mp3", n);
+    return std::ranges::find(s.opened, path) != s.opened.end();
+  };
+  int opened_before_the_window = 0;
+  for (int n = 750; n < 984; ++n) opened_before_the_window += was_opened(n) ? 1 : 0;
+  CHECK(opened_before_the_window == 0);
+  int opened_for_tags = 0;
+  for (int n = 984; n < 1016; ++n) opened_for_tags += was_opened(n) ? 1 : 0;
+  CHECK(opened_for_tags == 32);
+}
+
+// A folder says it opens with the chevron the other list screens use; a song row has none.
+TEST_CASE("a folder row shows the chevron; a file row does not") {
+  MemoryStorage s;
+  s.add("/Album/x.mp3", fake_audio(16));
+  s.add("/Best/y.mp3", fake_audio(16));
+  s.add("/a.mp3", fake_audio(16));
+  FakeOutput out;
+  Player player{s, out};
+  PlayerUi ui{nullptr, player};
+  ui.set_storage(&s);
+  press(ui, {Button::Select, Button::Select});  // Music → Folders: Album/, Best/, a.mp3
+
+  constexpr int W = 320, H = 240;
+  prism::app::WidgetTree tree(ui);
+  prism::raster::Fonts fonts;
+  tree.set_text_measurer(&fonts);
+  const auto snap = tree.build_snapshot(W, H, 1);
+  REQUIRE(snap);
+  std::vector<std::uint32_t> fb(std::size_t{W} * H);
+  prism::raster::Canvas canvas{fb, W, H, W};
+  canvas.clear(snap->window.background);
+  prism::raster::draw(canvas, *snap, fonts);
+
+  const auto at = origin_of_list_with(*snap, PlayerUi::kHighlight);
+  const auto pixel = [&](float x, float y) {
+    return fb[static_cast<std::size_t>(at.y.raw() + y) * W + static_cast<std::size_t>(at.x.raw() + x)];
+  };
+  // The chevron is the only ink at the right end of a row, past the clipped label. Rows 1 and 2 are
+  // unselected (row 0 holds the highlight), so their background is white.
+  const auto ink_beside_row = [&](std::size_t row) {
+    int found = 0;
+    const float centre =
+        PlayerUi::kTitleHeight + static_cast<float>(row) * PlayerUi::kRowHeight + PlayerUi::kRowHeight / 2;
+    for (float x = 288; x < 314; ++x)
+      for (float y = centre - 8; y < centre + 8; ++y)
+        if (pixel(x, y) != 0xFFFFFFFFu) ++found;
+    return found;
+  };
+  CHECK(ink_beside_row(1) > 0);   // Best/, a subfolder
+  CHECK(ink_beside_row(2) == 0);  // a.mp3, a file
+}
+
+TEST_CASE("with a card but no library, Music shows Folders and why there is no music") {
+  MemoryStorage s;
+  FakeOutput out;
+  Player player{s, out};
+  PlayerUi ui{nullptr, player};
+  ui.set_storage(&s);
+  press(ui, {Button::Select});
+  CHECK(ui.screen_title() == "Music");
+  CHECK(shows(ui, "Folders"));
+  CHECK(shows(ui, "No music"));
+
+  ui.set_library_status("Updating library…");
+  CHECK(shows(ui, "Folders"));
+  CHECK(shows(ui, "Updating library…"));
+}
+
+TEST_CASE("a file that cannot be opened keeps its place in the queue") {
+  MemoryStorage memory;
+  const auto sine = load("sine440_44k.mp3");
+  add_song(memory, "/Album/a.mp3", "A", "Band", "Album", 1, sine);
+  add_song(memory, "/Album/b.mp3", "B", "Band", "Album", 2, sine);
+  add_song(memory, "/Album/c.mp3", "C", "Band", "Album", 3, sine);
+  MissingFileStorage s{memory, "/Album/a.mp3"};
+  FakeOutput out;
+  Player player{s, out};
+  PlayerUi ui{nullptr, player};
+  ui.set_storage(&s);
+
+  press(ui, {Button::Select, Button::Select, Button::Select, Rotate{2}, Button::Select});
+  REQUIRE(ui.screen_title() == "Now Playing");
+  CHECK(player.queue_size() == 3U);            // a.mp3 is still in it, so the numbering holds
+  CHECK(player.queue().front().title == "a");  // named by file: its tags could not be read
+  CHECK(player.status().index == 2);
+  REQUIRE(player.current_track().has_value());
+  CHECK(player.current_track()->title == "C");
 }
 
 TEST_CASE("rotate past the end stops at the last row") {
