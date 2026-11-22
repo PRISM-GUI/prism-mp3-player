@@ -1,8 +1,8 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include "core/dir_storage.hpp"
 #include "core/fold.hpp"
 #include "core/library.hpp"
 #include "core/memory_storage.hpp"
-#include "desktop/dir_storage.hpp"
 #include "tests/counting_storage.hpp"
 #include "tests/tag_builder.hpp"
 #include "tests/temp_dir.hpp"
@@ -352,4 +352,36 @@ TEST_CASE("a stopped build keeps the old index") {
   const auto lib = Library::open(s, "/music");
   REQUIRE(lib);
   CHECK(lib->count({View::Songs}) == 150);
+}
+
+TEST_CASE("build without install leaves the live index untouched") {
+  MemoryStorage s;
+  fill_six(s);
+  REQUIRE(Library::build(s, "/music", keep_going));
+  add_song(s, "/music/new.mp3", "New", "abba", "Gold", 4);
+
+  REQUIRE(Library::build(s, "/music", keep_going, false));
+
+  const auto live = Library::open(s, "/music");
+  REQUIRE(live);
+  CHECK(live->count({View::Songs}) == 6);
+  CHECK_FALSE(live->is_current(s, "/music"));
+  CHECK(s.open("/music/.prism-library.new"));
+}
+
+TEST_CASE("install then open gives the new index") {
+  MemoryStorage s;
+  fill_six(s);
+  REQUIRE(Library::build(s, "/music", keep_going));
+  add_song(s, "/music/new.mp3", "New", "abba", "Gold", 4);
+  REQUIRE(Library::build(s, "/music", keep_going, false));
+
+  CHECK_FALSE(Library::install(s, "/nowhere"));
+  REQUIRE(Library::install(s, "/music"));
+
+  const auto lib = Library::open(s, "/music");
+  REQUIRE(lib);
+  CHECK(lib->count({View::Songs}) == 7);
+  CHECK(lib->is_current(s, "/music"));
+  CHECK(s.open("/music/.prism-library.new") == nullptr);
 }

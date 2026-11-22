@@ -1,6 +1,6 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include "core/dir_storage.hpp"
 #include "core/memory_storage.hpp"
-#include "desktop/dir_storage.hpp"
 #include "tests/temp_dir.hpp"
 
 #include <doctest.h>

@@ -2,7 +2,7 @@
 #include "core/library.hpp"
 #include "core/player.hpp"
 #include "core/ui.hpp"
-#include "desktop/dir_storage.hpp"
+#include "core/dir_storage.hpp"
 #include "desktop/sdl_pcm_output.hpp"
 
 #include <prism/input/input_event.hpp>

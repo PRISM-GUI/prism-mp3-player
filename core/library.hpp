@@ -40,8 +40,13 @@ public:
   // Whether the card still holds the files the index was built from.
   bool is_current(Storage&, std::string_view root) const;
   // Scans <root> recursively for .mp3, reads tags, writes the index. `progress(done)` is
-  // called every 100 files; returning false stops (the old index stays).
-  static bool build(Storage&, std::string_view root, const std::function<bool(int)>& progress);
+  // called every 100 files; returning false stops (the old index stays). With install == false
+  // the new index is only staged at <root>/.prism-library.new: FatFS cannot replace a file that
+  // is open, so the caller closes the library it has before calling install().
+  static bool build(Storage&, std::string_view root, const std::function<bool(int)>& progress,
+                    bool install = true);
+  // Moves the staged index over the live one; false when nothing is staged.
+  static bool install(Storage&, std::string_view root);
 
   std::size_t count(const ViewKey&) const;
   // Rows [first, first + n) of a view: names for Artists/Albums/AlbumsOfArtist, tracks for the

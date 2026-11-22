@@ -303,13 +303,11 @@ bool write_index(std::ostream& out, const Index& x) {
   return out.good();
 }
 
-bool replace_index(Storage& storage, std::string_view root, const Index& x) {
-  const auto path = join(root, file_name);
-  const auto temp = path + ".new";
-  auto out = storage.create(temp);
-  if (!out || !write_index(*out, x)) return false;
-  out.reset();
-  return storage.rename(temp, path);
+std::string staged_path(std::string_view root) { return join(root, file_name) + ".new"; }
+
+bool write_index_file(Storage& storage, std::string_view path, const Index& x) {
+  auto out = storage.create(path);
+  return out && write_index(*out, x);
 }
 
 }  // namespace
@@ -322,10 +320,17 @@ std::uint64_t fingerprint(Storage& storage, std::string_view root) {
 }
 
 bool Library::build(Storage& storage, std::string_view root,
-                    const std::function<bool(int)>& progress) {
+                    const std::function<bool(int)>& progress, bool install) {
   auto collected = scan(storage, root);
   if (!read_tracks(storage, collected, progress)) return false;
-  return replace_index(storage, root, index_of(std::move(collected)));
+  if (!write_index_file(storage, staged_path(root), index_of(std::move(collected)))) return false;
+  return !install || Library::install(storage, root);
+}
+
+bool Library::install(Storage& storage, std::string_view root) {
+  const auto staged = staged_path(root);
+  if (!storage.open(staged)) return false;
+  return storage.rename(staged, join(root, file_name));
 }
 
 }  // namespace player
