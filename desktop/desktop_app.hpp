@@ -1,15 +1,18 @@
 #pragma once
 #include "core/library.hpp"
+#include "core/cover_loader.hpp"
 #include "core/player.hpp"
 #include "core/ui.hpp"
 #include "core/dir_storage.hpp"
 #include "desktop/sdl_pcm_output.hpp"
 
 #include <prism/input/input_event.hpp>
+#include <prism/render/image_decoder.hpp>
 
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -20,10 +23,17 @@ namespace player {
 
 // The storage is rooted at the music folder, so the library's root is "/" in it.
 inline constexpr std::string_view kMusicRoot = "/";
+// Twice the 100 px cover box: a HiDPI window scales the image up, and decoding a JPEG twice the
+// box is cheap next to decoding it again later.
+inline constexpr int kCoverSide = 200;
 
 // Up/Down turn the wheel, Enter selects, Esc/Backspace is Menu, Space plays or pauses,
 // Left/Right skip.
 std::optional<WheelEvent> wheel_event_for_key(std::int32_t key);
+
+// The desktop's cover decoder: PRISM's own image decoder, which ignores the size cap because the
+// renderer scales whatever comes out.
+std::shared_ptr<const prism::render::Image> decode_cover(std::span<const std::byte> bytes, int max_side);
 
 // The player on a PC: the 320×240 screen beside the click wheel, a folder of MP3s, the sound
 // card. Its members are used on the logic thread only; the library is built on a thread of its
@@ -43,6 +53,9 @@ public:
   std::shared_ptr<Library> library;
   PlayerUi ui{nullptr, player};
   WheelWidget wheel{ui};
+  // After the storage and the UI, so it is destroyed before either: its thread reads the card and
+  // the UI points at it.
+  CoverLoader cover_loader{storage, decode_cover, kCoverSide};
 
 private:
   void load_library(prism::app::AppContext&);

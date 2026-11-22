@@ -19,6 +19,12 @@ std::shared_ptr<Library> build_library(Storage& storage, const std::stop_token& 
 
 }  // namespace
 
+std::shared_ptr<const prism::render::Image> decode_cover(std::span<const std::byte> bytes, int /*max_side*/) {
+  // The cap is the board's business: PRISM's decoder has no size limit and the renderer scales.
+  const auto image = prism::render::decode_image(bytes);
+  return image ? *image : nullptr;
+}
+
 std::optional<WheelEvent> wheel_event_for_key(std::int32_t key) {
   switch (key) {
     case keys::up: return Rotate{-1};
@@ -35,6 +41,7 @@ std::optional<WheelEvent> wheel_event_for_key(std::int32_t key) {
 
 void DesktopApp::start(prism::app::AppContext& ctx) {
   ctx.set_global_key_handler([this](const prism::input::KeyPress& k) { key(k); });
+  ui.set_cover_loader(&cover_loader);
   // simplify: the poll rides the frame clock, which stays active, so the logic thread wakes
   // every frame even when nothing plays. Upgrade: a deadline timer that runs only
   // while the player plays.

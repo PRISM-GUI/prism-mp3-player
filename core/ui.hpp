@@ -6,17 +6,21 @@
 #include <prism/core/field.hpp>
 #include <prism/input/input_event.hpp>
 
+#include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 namespace prism::app { class ViewBuilder; }
-namespace prism::render { struct DrawList; }
+namespace prism::render { struct DrawList; class Image; }
 namespace prism::ui { struct WidgetNode; }
 
 namespace player {
+
+class CoverLoader;
 
 namespace app = prism::app;
 namespace input = prism::input;
@@ -90,6 +94,9 @@ public:
     output_changed_ = std::move(handler);
   }
 
+  // Where covers come from. Null: Now Playing keeps its placeholder box.
+  void set_cover_loader(CoverLoader* loader) { cover_loader_ = loader; }
+
   void canvas(render::DrawList&, core::Rect, const ui::WidgetNode&);
   void view(app::ViewBuilder&);
 
@@ -128,8 +135,17 @@ private:
   std::vector<Row> visible_rows() const;
   void fit_rows(float height);
 
+  // Asks the loader for the current track's cover when that changed, and repaints when a load
+  // finished. Does nothing without a loader.
+  void watch_cover();
+  // The current track's cover, or null while it loads or when it has none.
+  std::shared_ptr<const render::Image> cover_image() const;
+
   Library* library_;
   Storage* storage_ = nullptr;  // the card, for Folders; not the same as the library
+  CoverLoader* cover_loader_ = nullptr;
+  std::string cover_path_;              // the track last asked for
+  std::uint64_t cover_revision_ = 0;    // the loader's revision when we last repainted for it
   Player& player_;
   int volume_ = kVolumeSteps / 2;
   bool polls_on_tick_ = true;

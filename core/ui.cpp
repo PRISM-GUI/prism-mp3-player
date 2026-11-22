@@ -1,5 +1,6 @@
 #include "core/ui.hpp"
 
+#include "core/cover_loader.hpp"
 #include "core/fold.hpp"
 #include "core/index_format.hpp"
 #include "core/tags.hpp"
@@ -294,6 +295,7 @@ void PlayerUi::play_folder(std::string_view dir, std::size_t row) {
 
 void PlayerUi::tick() {
   if (polls_on_tick_) player_.poll();
+  watch_cover();
   const auto now = player_.status();
   const bool clock_moved = here().screen == Screen::NowPlaying &&
                            static_cast<long>(now.position_s) != static_cast<long>(shown_.position_s);
@@ -301,6 +303,26 @@ void PlayerUi::tick() {
   if (same && !clock_moved) return;
   shown_ = now;
   changed();
+}
+
+// The thread that loads covers is the loader's: here we only say what we want and notice when it
+// answered, so a slow card never stalls the UI.
+void PlayerUi::watch_cover() {
+  if (!cover_loader_) return;
+  if (const auto track = player_.current_track(); track && track->path != cover_path_) {
+    cover_path_ = track->path;
+    cover_loader_->request(cover_path_);
+  }
+  if (const auto revision = cover_loader_->revision(); revision != cover_revision_) {
+    cover_revision_ = revision;
+    changed();
+  }
+}
+
+std::shared_ptr<const render::Image> PlayerUi::cover_image() const {
+  if (!cover_loader_ || cover_path_.empty()) return nullptr;
+  const auto loaded = cover_loader_->cover(cover_path_);
+  return loaded ? *loaded : nullptr;
 }
 
 void PlayerUi::set_library(Library* library) {

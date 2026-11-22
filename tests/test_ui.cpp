@@ -1,5 +1,6 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "core/library.hpp"
+#include "core/cover_loader.hpp"
 #include "core/memory_storage.hpp"
 #include "core/player.hpp"
 #include "core/ui.hpp"
@@ -18,11 +19,13 @@
 #include <prism/ui/widget_node.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <format>
 #include <fstream>
 #include <iterator>
 #include <optional>
+#include <thread>
 #include <utility>
 
 using namespace player;
@@ -755,4 +758,69 @@ TEST_CASE("Now Playing with a stopped player says Nothing playing and why") {
   CHECK(shows(ui, "Nothing playing"));
   CHECK(shows(ui, "Cannot decode alpha.mp3"));
   CHECK_FALSE(shows(ui, "Only"));
+}
+
+namespace {
+
+// A cover the fake decoder hands back: any pixels will do, the drawing only cares that it is an
+// image and not the placeholder.
+std::shared_ptr<const prism::render::Image> some_cover() {
+  static const auto image = [] {
+    const auto made = prism::render::Image::from_rgba(2, 2, std::vector<std::uint8_t>(16, 0x7f));
+    REQUIRE(made.has_value());
+    return *made;
+  }();
+  return image;
+}
+
+// The grey box Now Playing fills while it has no cover.
+const auto kPlaceholderFill = prism::core::Color::rgba(0xC8, 0xCC, 0xD2);
+
+bool draws_placeholder(const prism::render::DrawList& dl) {
+  return std::ranges::any_of(dl.commands, [](const auto& command) {
+    const auto* fill = std::get_if<prism::render::FilledRect>(&command);
+    return fill && fill->color == kPlaceholderFill;
+  });
+}
+
+bool draws_image(const prism::render::DrawList& dl) {
+  return std::ranges::any_of(dl.commands,
+                             [](const auto& command) { return std::get_if<prism::render::ImageCmd>(&command); });
+}
+
+}  // namespace
+
+TEST_CASE("Now Playing draws the track's cover once loaded, the placeholder before") {
+  MemoryStorage s;
+  auto body = id3v2(3, {frame(3, "TIT2", utf8_text("Covered")),
+                        frame(3, "APIC", apic_payload("image/png", bytes_of("picture bytes")))});
+  append(body, load("sine440_44k.mp3"));
+  s.add("/music/a.mp3", std::move(body), 1000);
+  REQUIRE(Library::build(s, "/music", [](int) { return true; }));
+  const auto library = open_library(s);
+  FakeOutput out;
+  Player player{s, out};
+  PlayerUi ui{library.get(), player};
+  CoverLoader loader{
+      s, [](std::span<const std::byte>, int) { return some_cover(); }, 100};
+  ui.set_cover_loader(&loader);
+
+  press(ui, {Button::Select, Rotate{3}, Button::Select, Button::Select});
+  REQUIRE(ui.screen_title() == "Now Playing");
+  REQUIRE(player.current_track().has_value());
+
+  ui.tick();  // asks the loader for this track's cover
+  const auto before = drawn(ui);
+  CHECK(draws_placeholder(before));
+  CHECK_FALSE(draws_image(before));
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+  while (loader.revision() == 0 && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  REQUIRE(loader.revision() != 0);
+
+  ui.tick();  // notices the finished load and repaints
+  const auto after = drawn(ui);
+  CHECK_FALSE(draws_placeholder(after));
+  CHECK(draws_image(after));
 }

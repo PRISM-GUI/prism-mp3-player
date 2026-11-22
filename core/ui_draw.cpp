@@ -243,7 +243,14 @@ void PlayerUi::draw_now_playing(const Pen& pen) const {
   auto& dl = pen.dl;
   const float width = pen.width;
 
-  dl.filled_rect(rect(14, 40, 100, 100), kCover);
+  // The cover, in the same box the placeholder fills: the placeholder shows until a load lands, and
+  // stays for a track without one.
+  const auto cover = cover_image();
+  if (cover) {
+    dl.image(std::move(cover), rect(14, 40, 100, 100));
+  } else {
+    dl.filled_rect(rect(14, 40, 100, 100), kCover);
+  }
   dl.rect_outline(rect(14, 40, 100, 100), kRule);
   const float x = 128, w = width - x - kPad;
   clipped_text(dl, track->title, rect(x, 44, w, 22), 16.f, kInk, kBold);
