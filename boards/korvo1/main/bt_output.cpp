@@ -37,6 +37,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 namespace player {
@@ -52,7 +53,6 @@ constexpr std::int64_t kStreamRetryUs = 500'000;
 constexpr std::uint32_t kLinkTaskStack = 6144;
 constexpr UBaseType_t kLinkTaskPriority = 5;
 constexpr UBaseType_t kQueueDepth = 32;
-constexpr TickType_t kPostWait = pdMS_TO_TICKS(100);
 constexpr std::size_t kNameBytes = 32;
 
 // Where the link is. waiting: nothing in flight, the next attempt is due in 3 s.
@@ -110,10 +110,13 @@ Event event(Event::Kind kind) {
   return out;
 }
 
-// Bounded wait: the Bluetooth task must not block for good on a full queue while the link task
-// waits on the Bluetooth task.
+// Never waits: this runs on the Bluetooth task, which the link task itself calls into, so a stall
+// here stalls the link task too.
+// simplify: an event dropped on a full queue is not recovered; the queue is 32 deep and a dropped
+// play means the stream starts at the next attach. Upgrade: a bigger queue, or a flag the link
+// task reads on every wake.
 void post(const Event& e) {
-  if (events && xQueueSend(events, &e, kPostWait) == pdTRUE) return;
+  if (events && xQueueSend(events, &e, 0) == pdTRUE) return;
   std::printf("bt: event %d dropped\n", static_cast<int>(e.kind));
 }
 
@@ -368,7 +371,10 @@ private:
     } else {
       return;
     }
-    if (ok) return request_stream();
+    if (ok) {
+      stream_.retried = false;  // an answer that came through leaves the retry unused
+      return request_stream();
+    }
     std::printf("bt: media command %d ack %d\n", static_cast<int>(command), static_cast<int>(status));
     schedule_stream_retry();
   }
@@ -567,8 +573,7 @@ bool BtOutput::start(PcmFormat format, PcmRing& ring) {
 // The stream itself keeps running: it sends silence while no ring is attached (see Stream).
 void BtOutput::stop() {
   shared.ring = nullptr;
-  while (shared.in_callback) {
-  }
+  while (shared.in_callback) std::this_thread::yield();
 }
 
 bool BtOutput::connected() const { return shared.link == Link::connected; }

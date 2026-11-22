@@ -52,7 +52,7 @@ public:
     return true;
   }
   void stop() override { ring_ = nullptr; }
-  bool connected() const override { return is_connected; }
+  bool connected() const override { return is_connected && (!connects_on_start || ring_ != nullptr); }
   std::uint32_t underruns() const override { return ring_ ? ring_->underruns() : last_underruns_; }
   void set_volume(float v) override { volume = v; }
 
@@ -71,6 +71,7 @@ public:
   std::set<int> rates{44100, 48000};
   bool start_fails = false;
   bool is_connected = true;
+  bool connects_on_start = false;  // a sink that reports connected() only after start()
   float volume = -1;
   int starts = 0;
   std::size_t queued_at_start = 0;
@@ -282,6 +283,20 @@ TEST_CASE("a disconnect pauses") {
   p.toggle_pause();
   CHECK(p.status().state == State::Playing);
   CHECK(f.out.started());
+}
+
+// The contract Player relies on: an output reports connected() before it is asked to start(), so
+// the sink must be open before the first track is chosen. One that connects only in start() never
+// gets there: play() pauses with the disconnect message instead.
+TEST_CASE("an output that connects only in start() never plays") {
+  Fixture f;
+  f.out.connects_on_start = true;
+  Player p{f.storage, f.out};
+  p.play({row("/44k.mp3")}, 0);
+  CHECK(p.status().state == State::Paused);
+  CHECK(p.status().message == "Headset disconnected");
+  CHECK_FALSE(f.out.started());
+  CHECK(f.out.starts == 0);
 }
 
 TEST_CASE("pause stops pulling and keeps the position") {

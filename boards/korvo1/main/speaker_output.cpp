@@ -31,9 +31,11 @@ void log_failure(const char* call, esp_err_t err) {
 // The writer owns the codec handle while it writes, the logic thread opens and closes it: the
 // handle is an atomic pointer so both can look at it. Everything else here is the logic thread's.
 struct SpeakerOutput::Impl {
-  std::atomic<esp_codec_dev_handle_t> codec{nullptr};
-  int rate = 0;
-  int volume = kMaxVolume;
+  esp_codec_dev_handle_t device = nullptr;  // created once, opened and closed in place
+  std::atomic<bool> opened{false};          // connected(): the player may start
+  int rate = 0;                             // the open rate, 0 when closed
+  std::atomic<int> volume{kMaxVolume};
+  std::mutex codec_mutex;  // one write against a close-and-reopen, and against set_out_vol
 
   std::atomic<PcmRing*> ring{nullptr};       // what the writer pops from while the player plays
   std::atomic<PcmRing*> last_ring{nullptr};  // so underruns() survives a pause
@@ -85,8 +87,7 @@ struct SpeakerOutput::Impl {
       ring = nullptr;
     }
     wake.notify_all();
-    while (inside.load()) {
-    }
+    while (inside.load()) std::this_thread::yield();
   }
 
   // Waits for a ring to play from. False: shutting down.
@@ -110,54 +111,69 @@ struct SpeakerOutput::Impl {
     }
   }
 
-  // Blocks on the I2S DMA until the codec takes the whole buffer: that is the pacing.
+  // Blocks on the I2S DMA until the codec takes the whole buffer: that is the pacing. The lock is
+  // what keeps a close-and-reopen in start() from landing in the middle of the write.
   void write(std::vector<std::int16_t>& buffer) {
-    const auto handle = codec.load();
-    if (!handle) return;
+    const std::lock_guard lock(codec_mutex);
+    if (!opened.load()) return;
     log_failure("esp_codec_dev_write",
-                esp_codec_dev_write(handle, buffer.data(),
+                esp_codec_dev_write(device, buffer.data(),
                                     static_cast<int>(buffer.size() * sizeof(std::int16_t))));
   }
 
-  // Opens the codec at `sample_rate`, closing it first when the rate changed. False: no codec.
-  bool open_codec(int sample_rate) {
-    if (codec.load() && rate == sample_rate) return true;
-    if (const auto handle = codec.load()) {
-      log_failure("esp_codec_dev_close", esp_codec_dev_close(handle));
-      codec = nullptr;
+  // Opens the handle at `sample_rate`, closing it first when the rate changed. False: cannot play.
+  bool open(int sample_rate) {
+    if (opened.load() && rate == sample_rate) return true;
+    const std::lock_guard lock(codec_mutex);
+    if (opened.load()) {
+      close_device();
+      opened = false;
       rate = 0;
     }
-    const auto handle = bsp_audio_codec_speaker_init();
-    if (!handle) {
-      std::printf("speaker: bsp_audio_codec_speaker_init returned null\n");
-      return false;
-    }
+    if (!device) return false;  // create() refused: no handle to open
     esp_codec_dev_sample_info_t info{};
     info.bits_per_sample = 16;
     info.channel = 2;
     info.channel_mask = 0;
     info.sample_rate = static_cast<std::uint32_t>(sample_rate);
     info.mclk_multiple = 0;
-    if (const auto err = esp_codec_dev_open(handle, &info); err != ESP_OK) {
+    if (const auto err = esp_codec_dev_open(device, &info); err != ESP_OK) {
       log_failure("esp_codec_dev_open", err);
-      log_failure("esp_codec_dev_close", esp_codec_dev_close(handle));
       return false;
     }
-    codec = handle;
+    opened = true;
     rate = sample_rate;
-    log_failure("esp_codec_dev_set_out_vol", esp_codec_dev_set_out_vol(handle, volume));
+    log_failure("esp_codec_dev_set_out_vol", esp_codec_dev_set_out_vol(device, volume.load()));
     return true;
+  }
+
+  void close_device() {
+    if (device) log_failure("esp_codec_dev_close", esp_codec_dev_close(device));
+  }
+
+  // Once per instance, from the constructor: the player asks connected() before it asks start(),
+  // so the codec exists and is open at 44.1 kHz before any track is chosen.
+  bool create() {
+    device = bsp_audio_codec_speaker_init();
+    if (!device) {
+      std::printf("speaker: bsp_audio_codec_speaker_init returned null\n");
+      return false;
+    }
+    return open(44100);
   }
 };
 
-SpeakerOutput::SpeakerOutput() : impl_{std::make_unique<Impl>()} { impl_->start_writer(); }
+SpeakerOutput::SpeakerOutput() : impl_{std::make_unique<Impl>()} {
+  impl_->create();
+  impl_->start_writer();
+}
 
 SpeakerOutput::~SpeakerOutput() {
   impl_->shutdown();  // the writer is out of the ring and done before the codec closes
-  if (const auto handle = impl_->codec.load()) {
-    log_failure("esp_codec_dev_close", esp_codec_dev_close(handle));
-    impl_->codec = nullptr;
-  }
+  const std::lock_guard lock(impl_->codec_mutex);
+  impl_->close_device();
+  impl_->opened = false;
+  impl_->device = nullptr;
 }
 
 bool SpeakerOutput::accepts(PcmFormat format) const {
@@ -166,7 +182,7 @@ bool SpeakerOutput::accepts(PcmFormat format) const {
 
 bool SpeakerOutput::start(PcmFormat format, PcmRing& ring) {
   if (!accepts(format)) return false;
-  if (!impl_->open_codec(format.sample_rate)) return false;
+  if (!impl_->open(format.sample_rate)) return false;  // reopens only when the rate changed
   impl_->attach(ring);
   return true;
 }
@@ -174,7 +190,7 @@ bool SpeakerOutput::start(PcmFormat format, PcmRing& ring) {
 // Never closes the codec: the next track plays through the same one, and a rate change reopens it.
 void SpeakerOutput::stop() { impl_->detach(); }
 
-bool SpeakerOutput::connected() const { return impl_->codec != nullptr; }
+bool SpeakerOutput::connected() const { return impl_->opened.load(); }
 
 std::uint32_t SpeakerOutput::underruns() const {
   auto* ring = impl_->ring.load();  // the last attached one when the player is paused
@@ -184,8 +200,10 @@ std::uint32_t SpeakerOutput::underruns() const {
 
 void SpeakerOutput::set_volume(float volume) {
   impl_->volume = static_cast<int>(std::clamp(volume, 0.f, 1.f) * kMaxVolume);
-  if (const auto handle = impl_->codec.load())
-    log_failure("esp_codec_dev_set_out_vol", esp_codec_dev_set_out_vol(handle, impl_->volume));
+  const std::lock_guard lock(impl_->codec_mutex);
+  if (impl_->opened.load())
+    log_failure("esp_codec_dev_set_out_vol",
+                esp_codec_dev_set_out_vol(impl_->device, impl_->volume.load()));
 }
 
 }  // namespace player
