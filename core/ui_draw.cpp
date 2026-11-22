@@ -247,11 +247,11 @@ void PlayerUi::draw_now_playing(const Pen& pen) const {
   // stays for a track without one.
   const auto cover = cover_image();
   if (cover) {
-    dl.image(std::move(cover), rect(14, 40, 100, 100));
+    dl.image(std::move(cover), rect(14, 40, kCoverSide, kCoverSide));
   } else {
-    dl.filled_rect(rect(14, 40, 100, 100), kCover);
+    dl.filled_rect(rect(14, 40, kCoverSide, kCoverSide), kCover);
   }
-  dl.rect_outline(rect(14, 40, 100, 100), kRule);
+  dl.rect_outline(rect(14, 40, kCoverSide, kCoverSide), kRule);
   const float x = 128, w = width - x - kPad;
   clipped_text(dl, track->title, rect(x, 44, w, 22), 16.f, kInk, kBold);
   clipped_text(dl, or_unknown(track->artist, "Unknown Artist"), rect(x, 70, w, 20), kText, kInk);

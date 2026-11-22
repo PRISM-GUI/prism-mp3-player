@@ -36,6 +36,7 @@ public:
   static constexpr float kScreenHeight = 240.f;
   static constexpr float kTitleHeight = 26.f;
   static constexpr float kRowHeight = 26.f;
+  static constexpr float kCoverSide = 100.f;  // Now Playing's cover box
   static constexpr std::size_t kVisibleRows = 8;  // on a 240-high screen; a taller one shows more
   static constexpr int kVolumeSteps = 20;  // 5% per wheel step
   static constexpr core::Color kHighlight = core::Color::rgba(0x2F, 0x6F, 0xD0);

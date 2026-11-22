@@ -8,11 +8,13 @@
 #include "app_support.hpp"
 #include "band_display.hpp"
 #include "bt_output.hpp"
+#include "jpeg_cover.hpp"
 #include "buttons.hpp"
 #include "settings_nvs.hpp"
 #include "speaker_output.hpp"
 #include "touch.hpp"
 
+#include "core/cover_loader.hpp"
 #include "core/dir_storage.hpp"
 #include "core/library.hpp"
 #include "core/player.hpp"
@@ -49,6 +51,8 @@ constexpr std::string_view kNoCard = "No SD card";
 constexpr std::string_view kUnreadable = "SD card not readable (FAT32 or exFAT)";
 constexpr std::uint32_t kBuilderStack = 32768;
 constexpr std::uint32_t kPollStack = 32768;
+constexpr std::uint32_t kCoverStack = 16384;  // read_tags and the shrink loop; the engine decodes
+constexpr int kCoverPriority = 2;              // under the poll thread's 5
 constexpr std::chrono::milliseconds kPollEvery{5};
 constexpr std::int64_t kStatusEveryUs = 5'000'000;
 
@@ -305,6 +309,23 @@ std::thread start_poll_thread(player::Player& player) {
   return thread;
 }
 
+// Covers load on a low-priority thread with its stack in PSRAM: the poll thread and Bluetooth, on
+// the same core, always come first. The JPEG engine does the decode; the loader reads and shrinks.
+std::unique_ptr<player::CoverLoader> start_cover_loader(player::Storage& storage, float ui_scale) {
+  esp_pthread_cfg_t previous{};
+  if (esp_pthread_get_cfg(&previous) != ESP_OK) previous = esp_pthread_get_default_config();
+  esp_pthread_cfg_t cfg = previous;
+  cfg.stack_size = kCoverStack;
+  cfg.prio = kCoverPriority;
+  cfg.pin_to_core = 0;
+  cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+  esp_pthread_set_cfg(&cfg);
+  const int box_px = static_cast<int>(player::PlayerUi::kCoverSide * ui_scale);
+  auto loader = std::make_unique<player::CoverLoader>(storage, player::decode_jpeg_cover, box_px);
+  esp_pthread_set_cfg(&previous);
+  return loader;
+}
+
 const char* state_name(player::Player::Status::State state) {
   switch (state) {
     case player::Player::Status::State::Stopped: return "stopped";
@@ -366,6 +387,8 @@ extern "C" void app_main() {
     radio->on_remote([](player::Button button) { remote.post(button); });
   static auto buttons = open_buttons();
   static auto polling = start_poll_thread(model.player);
+  static auto covers = start_cover_loader(model.storage, options.ui_scale);
+  model.ui.set_cover_loader(covers.get());
   prism::platform::frame_app(*display, input, model, [card](prism::platform::FrameContext& ctx) {
     ctx.on_loop([] { remote.drain(model.ui); });
     ctx.on_loop([] { handle_presses(buttons, model.ui); });

@@ -13,7 +13,7 @@ core_inc = include_directories('.')
 
 player_core = static_library('player_core', files('core/cover_loader.cpp', 'core/dir_storage.cpp', 'core/fold.cpp', 'core/library.cpp', 'core/library_build.cpp',
     'core/memory_storage.cpp', 'core/mp3_decoder.cpp', 'core/player.cpp', 'core/ui.cpp', 'core/ui_draw.cpp', 'core/wheel.cpp',
-    'core/tags.cpp'),
+    'core/shrink.cpp', 'core/tags.cpp'),
   include_directories : core_inc,
   dependencies : prism_core_dep,
 )
