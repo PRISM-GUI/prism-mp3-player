@@ -240,7 +240,7 @@ TEST_CASE("Select on a song plays the album from that song") {
   CHECK(f.storage.opened == std::vector<std::string>{"/music/a/g2.mp3", "/music/a/g3.mp3"});
 }
 
-TEST_CASE("Select in Songs queues at most 500 songs from the selected one") {
+TEST_CASE("Select in Songs queues 500 songs, up to 250 of them before the selected one") {
   CountingStorage storage{ten_thousand_songs()};
   const auto library = open_library(storage);
   FakeOutput out;
@@ -249,26 +249,49 @@ TEST_CASE("Select in Songs queues at most 500 songs from the selected one") {
   press(ui, {Button::Select, Rotate{2}, Button::Select, Rotate{100}});
   storage.opened.clear();
   press(ui, {Button::Select});
-  REQUIRE(storage.opened.size() == 500);
+  // The fake audio does not decode: the player tries the selected song and each one after it.
+  REQUIRE(storage.opened.size() == 400);
   CHECK(storage.opened.front() == "/music/010/00100.mp3");
-  CHECK(storage.opened.back() == "/music/059/00599.mp3");
+  CHECK(storage.opened.back() == "/music/049/00499.mp3");
+  CHECK(player.queue().front().title == "Song 00000");
 }
 
-TEST_CASE("Select in a 2,000-song album queues the 500 songs from the selected one") {
+TEST_CASE("Select in a 2,000-song album queues 500 songs around the selected one and plays it") {
+  const auto sine = load("sine440_44k.mp3");
   MemoryStorage memory;
   for (int n = 0; n < 2000; ++n)
-    add_song(memory, std::format("/music/huge/{:04}.mp3", n), std::format("Track {:04}", n), "Band", "Huge", n + 1);
+    add_song(memory, std::format("/music/huge/{:04}.mp3", n), std::format("Track {:04}", n), "Band", "Huge", n + 1, sine);
   REQUIRE(Library::build(memory, "/music", [](int) { return true; }));
   const auto library = open_library(memory);
   FakeOutput out;
   Player player{memory, out};
   PlayerUi ui{library.get(), player};
-  press(ui, {Button::Select, Rotate{1}, Button::Select, Button::Select, Rotate{100}});
+  press(ui, {Button::Select, Rotate{1}, Button::Select, Button::Select, Rotate{1000}});
   REQUIRE(ui.screen_title() == "Huge");
   press(ui, {Button::Select});
   REQUIRE(player.queue().size() == 500);
-  CHECK(player.queue().front().title == "Track 0100");
-  CHECK(player.queue().back().title == "Track 0599");
+  CHECK(player.queue().front().title == "Track 0750");
+  CHECK(player.queue().back().title == "Track 1249");
+  REQUIRE(player.status().state == Player::Status::State::Playing);
+  CHECK(player.queue()[player.status().index].title == "Track 1000");
+}
+
+TEST_CASE("Previous from the 5th song of a 12-song album plays the 4th") {
+  const auto sine = load("sine440_44k.mp3");
+  MemoryStorage memory;
+  for (int n = 1; n <= 12; ++n)
+    add_song(memory, std::format("/music/twelve/{:02}.mp3", n), std::format("Track {:02}", n), "Band", "Twelve", n, sine);
+  REQUIRE(Library::build(memory, "/music", [](int) { return true; }));
+  const auto library = open_library(memory);
+  FakeOutput out;
+  Player player{memory, out};
+  PlayerUi ui{library.get(), player};
+  press(ui, {Button::Select, Rotate{1}, Button::Select, Button::Select, Rotate{4}, Button::Select});
+  REQUIRE(ui.screen_title() == "Now Playing");
+  REQUIRE(player.queue()[player.status().index].title == "Track 05");
+  press(ui, {Button::Previous});
+  REQUIRE(player.status().state == Player::Status::State::Playing);
+  CHECK(player.queue()[player.status().index].title == "Track 04");
 }
 
 TEST_CASE("no library: the Music screen says No music") {

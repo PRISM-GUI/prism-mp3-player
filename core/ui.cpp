@@ -9,10 +9,12 @@ namespace {
 
 using Screen = PlayerUi::Screen;
 
-// simplify: Select in a song view (Songs, an album) queues the 500 songs from the selected one,
-// not all of them (10,000 TrackRows would take MBs of RAM on the board). Upgrade: a Player queue that pages
-// its tracks from the Library by view and row.
+// simplify: Select in a song view (Songs, an album) of at most 500 songs queues the whole view;
+// in a larger one, a window of 500 songs, up to 250 of them before the selected one (10,000
+// TrackRows would take MBs of RAM on the board). Upgrade: a Player queue that pages its tracks
+// from the Library by view and row.
 constexpr std::size_t kSongsQueue = 500;
+constexpr std::size_t kSongsBefore = kSongsQueue / 2;
 
 constexpr std::array kMusicViews{View::Artists, View::Albums, View::Songs};
 
@@ -138,9 +140,11 @@ void PlayerUi::select_list_row() {
 }
 
 void PlayerUi::play_from(std::size_t row) {
-  auto queue = library_->tracks(here().key, row, kSongsQueue);
-  if (queue.empty()) return;
-  player_.play(std::move(queue), 0);
+  const bool whole_view = here().count <= kSongsQueue;
+  const auto first = whole_view ? 0 : row - std::min(row, kSongsBefore);
+  auto queue = library_->tracks(here().key, first, kSongsQueue);
+  if (row - first >= queue.size()) return;
+  player_.play(std::move(queue), row - first);
   open(menu(Screen::NowPlaying));
 }
 
