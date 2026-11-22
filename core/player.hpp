@@ -34,6 +34,7 @@ public:
     std::string message;  // why a track was skipped or playback paused; empty when all is well
   };
   Status status() const;
+  const std::vector<TrackRow>& queue() const { return queue_; }
 
 private:
   // A track in the ring, from sample `start` of the stream.
