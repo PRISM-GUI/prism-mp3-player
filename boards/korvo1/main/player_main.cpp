@@ -238,9 +238,9 @@ private:
   std::vector<player::Button> queue_;  // guarded by mutex_: written on the Bluetooth task
 };
 
-// poll() decodes a few frames and refills the ring: it runs here, on the logic core, with its
-// stack in PSRAM, so nothing the user does waits for a decode. The board never shuts down, so this
-// loop ends with it and is never joined.
+// poll() decodes a few frames and refills the ring: it runs here, on core 0, with its stack in
+// PSRAM, so nothing the user does waits for a decode. The board never shuts down, so this loop ends
+// with it and is never joined.
 std::thread start_poll_thread(player::Player& player) {
   esp_pthread_cfg_t previous{};
   if (esp_pthread_get_cfg(&previous) != ESP_OK) previous = esp_pthread_get_default_config();
@@ -281,12 +281,14 @@ void print_status_line(const PlayerModel& model) {
               heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 }
 
-// Settings → Bluetooth shows what the radio is doing; the string is replaced only when it changes,
-// so the canvas is not repainted every frame.
+// Settings → Bluetooth shows what the radio is doing. Comparing the revision keeps the loop free of
+// strings and locks; the text is rebuilt (and the canvas repainted) only when the state changes.
 void show_bluetooth(player::PlayerUi& ui, const player::BtOutput& radio) {
-  auto text = radio.state_text();
-  if (text == ui.settings.bluetooth) return;
-  ui.settings.bluetooth = std::move(text);
+  static std::uint32_t shown = 0;
+  const auto revision = radio.state_revision();
+  if (revision == shown) return;
+  shown = revision;
+  ui.settings.bluetooth = radio.state_text();
   ui.revision.set(ui.revision.get() + 1);
 }
 

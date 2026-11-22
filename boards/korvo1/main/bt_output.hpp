@@ -31,6 +31,10 @@ public:
 
   // "Off", "Scanning…", "Connecting…", "Connected to <name>": the Settings screen's value.
   std::string state_text() const;
+
+  // A number that changes when state_text() would say something else: compare it instead of
+  // building the string (and taking a lock) every frame.
+  std::uint32_t state_revision() const;
 };
 
 }  // namespace player
