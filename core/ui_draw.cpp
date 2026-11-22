@@ -2,11 +2,25 @@
 
 #include <prism/app/widget_tree.hpp>
 #include <prism/render/draw_list.hpp>
+#include <prism/ui/text_metrics.hpp>
 
 #include <algorithm>
 #include <format>
 
 namespace player {
+
+// Where a screen draws: the list, its width, and the measurer of the text (null: 0.6 em a
+// character, as PRISM estimates without fonts).
+struct PlayerUi::Pen {
+  render::DrawList& dl;
+  const ui::TextMeasurer* measurer;
+  float width;
+  float text_width(std::string_view s, float size, render::FontStyle font = {}) const {
+    return ui::text_width(measurer, s, size, font);
+  }
+  float line_height(float size, render::FontStyle font = {}) const { return ui::line_height(measurer, size, font); }
+};
+
 namespace {
 
 using core::Color;
@@ -20,19 +34,21 @@ using core::Y;
 using render::DrawList;
 using render::FontStyle;
 using render::TextAnchor;
+using Pen = PlayerUi::Pen;
 using Screen = PlayerUi::Screen;
 using State = Player::Status::State;
 
 constexpr Color kWhite = Color::rgba(0xFF, 0xFF, 0xFF);
 constexpr Color kInk = Color::rgba(0x10, 0x10, 0x10);
 constexpr Color kGreyInk = Color::rgba(0x6E, 0x6E, 0x6E);
-constexpr Color kTitleBar = Color::rgba(0xE4, 0xE6, 0xEA);
 constexpr Color kRule = Color::rgba(0xA0, 0xA4, 0xAA);
 constexpr Color kTrack = Color::rgba(0xD6, 0xD8, 0xDC);
 constexpr Color kCover = Color::rgba(0xC8, 0xCC, 0xD2);
 constexpr float kText = 15.f;
 constexpr float kSmallText = 12.f;
 constexpr float kPad = 10.f;
+constexpr float kBarMargin = 14.f;     // the progress and volume bars' side margins
+constexpr float kTitleReserve = 54.f;  // the title bar's right end: battery and play state
 constexpr const FontStyle kBold{render::FontRole::Ui, true};
 
 Rect rect(float x, float y, float w, float h) { return {Point{X{x}, Y{y}}, Size{Width{w}, Height{h}}}; }
@@ -42,11 +58,19 @@ void text(DrawList& dl, std::string s, float x, float y, float size, Color c, Fo
   dl.text(std::move(s), pt(x, y), size, c, 0.f, TextAnchor::TopLeft, font);
 }
 
-// `s` inside [x, x + w) on one line: what does not fit is cut, not drawn over its neighbours.
-void clipped_text(DrawList& dl, std::string s, Rect box, float size, Color c, FontStyle font = {}) {
+// `s` drawn `dx, dy` into `box`: what does not fit is cut, not drawn over its neighbours.
+void clipped_text(DrawList& dl, std::string s, Rect box, float size, Color c, FontStyle font = {},
+                  float dx = 0, float dy = 0) {
   dl.clip_push(box.origin, box.extent);
-  text(dl, std::move(s), 0.f, 0.f, size, c, font);
+  text(dl, std::move(s), dx, dy, size, c, font);
   dl.clip_pop();
+}
+
+// `s` centred in [x, x + w) when it fits, else from x and cut at the end.
+void centred_text(const Pen& pen, std::string s, Rect box, float size, Color c, FontStyle font = {}) {
+  const float slack = box.extent.w.raw() - pen.text_width(s, size, font);
+  const float dy = (box.extent.h.raw() - pen.line_height(size, font)) / 2;
+  clipped_text(pen.dl, std::move(s), box, size, c, font, std::max(0.f, slack / 2), dy);
 }
 
 void play_glyph(DrawList& dl, float x, float y, float h, Color c) {
@@ -56,6 +80,13 @@ void play_glyph(DrawList& dl, float x, float y, float h, Color c) {
 void pause_glyph(DrawList& dl, float x, float y, float h, Color c) {
   dl.filled_rect(rect(x, y, h * 0.3f, h), c);
   dl.filled_rect(rect(x + h * 0.55f, y, h * 0.3f, h), c);
+}
+
+// simplify: always shown full; no battery is read yet. Upgrade: the board's fuel gauge.
+void battery(DrawList& dl, float x, float y) {
+  dl.rect_outline(rect(x, y, 20, 11), PlayerUi::kBattery, 1.f);
+  dl.filled_rect(rect(x + 20, y + 3, 2, 5), PlayerUi::kBattery);
+  dl.filled_rect(rect(x + 2, y + 2, 16, 7), kGreyInk);
 }
 
 void chevron(DrawList& dl, float x, float y, Color c) {
@@ -72,18 +103,19 @@ float row_top(std::size_t visible_index) {
 }
 
 // One row of a menu or list: the highlight bar when selected, the label, a chevron when it opens
-// another screen. `value`, when given, is shown at the right half (a setting's value).
-void draw_row(DrawList& dl, float width, std::size_t visible_index, bool selected, std::string label,
-              bool opens, std::string value = {}) {
-  const float y = row_top(visible_index);
-  dl.filled_rect(rect(0, y, width, PlayerUi::kRowHeight), selected ? PlayerUi::kHighlight : kWhite);
+// another screen, and the row's value (a setting's, an album's artist) right-aligned in grey.
+void draw_row(const Pen& pen, float width, std::size_t visible_index, bool selected, const PlayerUi::Row& row,
+              bool opens) {
+  const float y = row_top(visible_index), h = PlayerUi::kRowHeight - 3;
+  pen.dl.filled_rect(rect(0, y, width, PlayerUi::kRowHeight), selected ? PlayerUi::kHighlight : kWhite);
   const Color ink = selected ? kWhite : kInk;
-  const float label_width = (value.empty() ? width - 30.f : width / 2) - kPad;
-  clipped_text(dl, std::move(label), rect(kPad, y + 3, label_width, PlayerUi::kRowHeight - 3), kText, ink);
-  if (!value.empty())
-    clipped_text(dl, std::move(value), rect(width / 2, y + 3, width / 2 - kPad, PlayerUi::kRowHeight - 3),
-                 kText, selected ? kWhite : kGreyInk);
-  if (opens) chevron(dl, width - 18.f, y + PlayerUi::kRowHeight / 2, ink);
+  const float right = width - (opens ? 30.f : kPad);
+  const float value_w = std::min(pen.text_width(row.value, kText), (right - kPad) / 2);
+  const float label_right = row.value.empty() ? right : right - value_w - 8.f;
+  clipped_text(pen.dl, row.label, rect(kPad, y + 3, label_right - kPad, h), kText, ink);
+  if (!row.value.empty())
+    clipped_text(pen.dl, row.value, rect(right - value_w, y + 3, value_w, h), kText, selected ? kWhite : kGreyInk);
+  if (opens) chevron(pen.dl, width - 18.f, y + PlayerUi::kRowHeight / 2, ink);
 }
 
 void draw_scrollbar(DrawList& dl, float width, float height, const PlayerUi::Place& p) {
@@ -96,8 +128,8 @@ void draw_scrollbar(DrawList& dl, float width, float height, const PlayerUi::Pla
   dl.filled_rect(rect(width - 6, PlayerUi::kTitleHeight + thumb_y, 6, thumb_h), kRule);
 }
 
-void centred_note(DrawList& dl, float width, float y, std::string s) {
-  dl.text(std::move(s), pt(width / 2, y), kText, kGreyInk, 0.f, TextAnchor::Center);
+void centred_note(const Pen& pen, float y, std::string s, float size = kText) {
+  centred_text(pen, std::move(s), rect(kPad, y, pen.width - 2 * kPad, 22), size, kGreyInk);
 }
 
 void progress_bar(DrawList& dl, Rect r, float fraction, Color fill) {
@@ -113,72 +145,85 @@ std::string or_unknown(std::string s, std::string_view unknown) { return s.empty
 
 }  // namespace
 
-void PlayerUi::canvas(render::DrawList& dl, core::Rect bounds, const ui::WidgetNode&) {
-  const float width = bounds.extent.w.raw();
-  dl.filled_rect(rect(0, 0, width, bounds.extent.h.raw()), kWhite);
-  draw_title(dl, width);
+void PlayerUi::canvas(render::DrawList& dl, core::Rect bounds, const ui::WidgetNode& node) {
+  const Pen pen{dl, node.theme ? node.theme->measurer : nullptr, bounds.extent.w.raw()};
+  dl.filled_rect(rect(0, 0, pen.width, bounds.extent.h.raw()), kWhite);
+  draw_title(pen);
   switch (here().screen) {
-    case Screen::List: draw_list(dl, width); break;
-    case Screen::NowPlaying: draw_now_playing(dl, width); break;
-    default: draw_menu(dl, width); break;
+    case Screen::List: draw_list(pen); break;
+    case Screen::NowPlaying: draw_now_playing(pen); break;
+    default: draw_menu(pen); break;
   }
-  draw_scrollbar(dl, width, bounds.extent.h.raw(), here());
+  draw_scrollbar(dl, pen.width, bounds.extent.h.raw(), here());
 }
 
 void PlayerUi::view(app::ViewBuilder& vb) {
   vb.canvas(*this).min_size(Width{320}).min_size(Height{240}).depends_on(revision);
 }
 
-void PlayerUi::draw_title(render::DrawList& dl, float width) const {
-  dl.filled_rect(rect(0, 0, width, kTitleHeight), kTitleBar);
-  dl.filled_rect(rect(0, kTitleHeight - 1, width, 1), kRule);
-  dl.text(std::string{screen_title()}, pt(width / 2, kTitleHeight / 2), kText, kInk, 0.f, TextAnchor::Center, kBold);
+void PlayerUi::draw_title(const Pen& pen) const {
+  const float width = pen.width;
+  pen.dl.filled_rect(rect(0, 0, width, kTitleHeight), kTitleBar);
+  pen.dl.filled_rect(rect(0, kTitleHeight - 1, width, 1), kRule);
+  centred_text(pen, std::string{screen_title()}, rect(kTitleReserve, 0, width - 2 * kTitleReserve, kTitleHeight - 1),
+               kText, kInk, kBold);
+  battery(pen.dl, width - 50, 7);
   const auto state = player_.status().state;
-  if (state == State::Playing) play_glyph(dl, width - 22, 7, 12, kInk);
-  if (state == State::Paused) pause_glyph(dl, width - 22, 7, 12, kInk);
+  if (state == State::Playing) play_glyph(pen.dl, width - 22, 7, 12, kInk);
+  if (state == State::Paused) pause_glyph(pen.dl, width - 22, 7, 12, kInk);
 }
 
-void PlayerUi::draw_menu(render::DrawList& dl, float width) const {
+void PlayerUi::draw_menu(const Pen& pen) const {
   const auto& p = here();
-  if (p.screen == Screen::Music && !library_) return centred_note(dl, width, 120, "No music");
+  if (p.screen == Screen::Music && !library_) return centred_note(pen, 110, "No music");
   const auto rows = menu_rows(p.screen);
   const bool opens = p.screen != Screen::Settings;
   for (std::size_t i = p.top; i < std::min(rows.size(), p.top + kVisibleRows); ++i) {
-    std::string value;
+    Row row{rows[i], {}};
     if (p.screen == Screen::Settings)
-      value = i == 0 ? (settings.outputs.empty() ? "" : settings.outputs[settings.output]) : settings.bluetooth;
-    draw_row(dl, width, i - p.top, i == p.selected, rows[i], opens, std::move(value));
+      row.value = i == 0 ? (settings.outputs.empty() ? "" : settings.outputs[settings.output]) : settings.bluetooth;
+    draw_row(pen, pen.width, i - p.top, i == p.selected, row, opens);
   }
   if (p.screen == Screen::Settings)
-    text(dl, "The output changes at the next start.", kPad, row_top(3), kSmallText, kGreyInk);
+    text(pen.dl, "The output changes at the next start.", kPad, row_top(3), kSmallText, kGreyInk);
 }
 
-// Only the rows on screen are read from the library.
-std::vector<std::string> PlayerUi::visible_rows() const {
+// Only the rows on screen are read from the library. In the Albums view, each album's artist is
+// its value: two artists' albums of the same name stay apart.
+std::vector<PlayerUi::Row> PlayerUi::visible_rows() const {
   const auto& p = here();
-  std::vector<std::string> rows;
+  std::vector<Row> rows;
   if (is_song_view(p.key.view)) {
-    for (auto& t : library_->tracks(p.key, p.top, kVisibleRows)) rows.push_back(std::move(t.title));
+    for (auto& t : library_->tracks(p.key, p.top, kVisibleRows)) rows.push_back({std::move(t.title), {}});
     return rows;
   }
   const auto unknown = p.key.view == View::Artists ? "Unknown Artist" : "Unknown Album";
-  for (auto& n : library_->names(p.key, p.top, kVisibleRows)) rows.push_back(or_unknown(std::move(n), unknown));
+  for (auto& n : library_->names(p.key, p.top, kVisibleRows)) rows.push_back({or_unknown(std::move(n), unknown), {}});
+  if (p.key.view != View::Albums) return rows;
+  const auto artists = library_->album_artists(p.key, p.top, rows.size());
+  for (std::size_t i = 0; i < std::min(rows.size(), artists.size()); ++i)
+    rows[i].value = or_unknown(artists[i], "Unknown Artist");
   return rows;
 }
 
-void PlayerUi::draw_list(render::DrawList& dl, float width) const {
+void PlayerUi::draw_list(const Pen& pen) const {
   const auto& p = here();
   const bool opens = !is_song_view(p.key.view);
   const auto rows = visible_rows();
-  for (std::size_t i = 0; i < rows.size(); ++i)
-    draw_row(dl, width - 6, i, p.top + i == p.selected, rows[i], opens);
+  for (std::size_t i = 0; i < rows.size(); ++i) draw_row(pen, pen.width - 6, i, p.top + i == p.selected, rows[i], opens);
 }
 
-void PlayerUi::draw_now_playing(render::DrawList& dl, float width) const {
+void PlayerUi::draw_now_playing(const Pen& pen) const {
   const auto status = player_.status();
   const auto& queue = player_.queue();
-  if (queue.empty() || status.index >= queue.size()) return centred_note(dl, width, 120, "Nothing playing");
+  if (status.state == State::Stopped || status.index >= queue.size()) {
+    centred_note(pen, 100, "Nothing playing");
+    if (!status.message.empty()) centred_note(pen, 126, status.message, kSmallText);
+    return;
+  }
   const auto& track = queue[status.index];
+  auto& dl = pen.dl;
+  const float width = pen.width;
 
   dl.filled_rect(rect(14, 40, 100, 100), kCover);
   dl.rect_outline(rect(14, 40, 100, 100), kRule);
@@ -189,11 +234,15 @@ void PlayerUi::draw_now_playing(render::DrawList& dl, float width) const {
   text(dl, std::format("{} of {}", status.index + 1, queue.size()), x, 116, kSmallText, kGreyInk);
   if (!status.message.empty()) clipped_text(dl, status.message, rect(14, 146, width - 28, 18), kSmallText, kGreyInk);
 
+  const float bar_right = width - kBarMargin;
   const auto fraction = status.duration_s > 0 ? static_cast<float>(status.position_s / status.duration_s) : 0.f;
-  progress_bar(dl, rect(14, 168, width - 28, 8), fraction, kHighlight);
-  text(dl, clock(status.position_s), 14, 180, kSmallText, kInk);
-  text(dl, "-" + clock(status.duration_s - status.position_s), width - 54, 180, kSmallText, kInk);
-  progress_bar(dl, rect(14, 222, width - 28, 4), static_cast<float>(volume_) / kVolumeSteps, kRule);
+  progress_bar(dl, rect(kBarMargin, 168, bar_right - kBarMargin, 8), fraction, kHighlight);
+  text(dl, clock(status.position_s), kBarMargin, 180, kSmallText, kInk);
+  auto remaining = "-" + clock(status.duration_s - status.position_s);
+  const float remaining_x = bar_right - pen.text_width(remaining, kSmallText);
+  text(dl, std::move(remaining), remaining_x, 180, kSmallText, kInk);
+  progress_bar(dl, rect(kBarMargin, 222, bar_right - kBarMargin, 4), static_cast<float>(volume_) / kVolumeSteps,
+               kRule);
 }
 
 namespace {

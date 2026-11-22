@@ -14,11 +14,16 @@
 #include <prism/raster/fonts.hpp>
 #include <prism/render/draw_list.hpp>
 #include <prism/render/scene_snapshot.hpp>
+#include <prism/ui/text_metrics.hpp>
 #include <prism/ui/widget_node.hpp>
 
 #include <algorithm>
 #include <cstdio>
 #include <format>
+#include <fstream>
+#include <iterator>
+#include <optional>
+#include <utility>
 
 using namespace player;
 using namespace player::testing;
@@ -42,12 +47,20 @@ public:
   float volume = -1;
 };
 
+Bytes load(std::string_view name) {
+  std::ifstream in{std::string{TEST_DATA_DIR} + "/" + std::string{name}, std::ios::binary};
+  REQUIRE(in);
+  std::vector<char> chars{std::istreambuf_iterator<char>{in}, {}};
+  const auto* p = reinterpret_cast<const std::byte*>(chars.data());
+  return {p, p + chars.size()};
+}
+
 void add_song(MemoryStorage& s, std::string path, std::string_view title, std::string_view artist,
-              std::string_view album, int track) {
+              std::string_view album, int track, const Bytes& audio = fake_audio(16)) {
   auto b = id3v2(3, {frame(3, "TIT2", utf8_text(title)), frame(3, "TPE1", utf8_text(artist)),
                      frame(3, "TALB", utf8_text(album)),
                      frame(3, "TRCK", latin1_text(std::to_string(track)))});
-  append(b, fake_audio(16));
+  append(b, audio);
   s.add(std::move(path), std::move(b), 1000);
 }
 
@@ -79,11 +92,17 @@ std::unique_ptr<Library> open_library(Storage& s) {
   return lib;
 }
 
-// The texts the UI draws on its 320×240 canvas.
-std::vector<std::string> texts(PlayerUi& ui) {
+// What the UI draws on its 320×240 canvas, with no text measurer (0.6 em per character).
+prism::render::DrawList drawn(PlayerUi& ui) {
   prism::render::DrawList dl;
   prism::ui::WidgetNode node;
   ui.canvas(dl, Rect{Point{X{0}, Y{0}}, Size{Width{320}, Height{240}}}, node);
+  return dl;
+}
+
+// The texts the UI draws.
+std::vector<std::string> texts(PlayerUi& ui) {
+  const auto dl = drawn(ui);
   std::vector<std::string> out;
   for (const auto& cmd : dl.commands)
     if (const auto* t = std::get_if<prism::render::TextCmd>(&cmd)) out.push_back(t->text);
@@ -111,6 +130,20 @@ bool shows(PlayerUi& ui, std::string_view text) { return contains(texts(ui), tex
 void press(PlayerUi& ui, std::initializer_list<WheelEvent> events) {
   for (const auto& e : events) ui.handle(e);
 }
+
+// The text command drawing `text`, and the clip it is drawn in (none: nullopt).
+std::pair<const prism::render::TextCmd*, std::optional<Rect>> text_and_clip(const prism::render::DrawList& dl,
+                                                                            std::string_view text) {
+  std::optional<Rect> clip;
+  for (const auto& cmd : dl.commands) {
+    if (const auto* c = std::get_if<prism::render::ClipPush>(&cmd)) clip = c->rect;
+    if (std::holds_alternative<prism::render::ClipPop>(cmd)) clip.reset();
+    if (const auto* t = std::get_if<prism::render::TextCmd>(&cmd); t && t->text.starts_with(text)) return {t, clip};
+  }
+  return {nullptr, std::nullopt};
+}
+
+float right_of(Rect r) { return r.origin.x.raw() + r.extent.w.raw(); }
 
 struct Six {
   MemoryStorage memory;
@@ -279,4 +312,94 @@ TEST_CASE("drawing a list highlights the selected row") {
   CHECK(pixel(4, row0) == 0xFFFFFFFFu);                            // white row
   CHECK(pixel(4, row0 + PlayerUi::kRowHeight) == 0xFF2F6FD0u);     // the highlight bar
   CHECK(pixel(4, row0 + 2 * PlayerUi::kRowHeight) == 0xFFFFFFFFu);
+}
+
+TEST_CASE("the title bar has a battery left of the play state") {
+  Six f;
+  PlayerUi ui{f.library.get(), f.player};
+  prism::app::WidgetTree tree(ui);
+  prism::raster::Fonts fonts;
+  tree.set_text_measurer(&fonts);
+  constexpr int W = 320, H = 240;
+  const auto snap = tree.build_snapshot(W, H, 1);
+  REQUIRE(snap);
+  std::vector<std::uint32_t> fb(std::size_t{W} * H);
+  prism::raster::Canvas canvas{fb, W, H, W};
+  canvas.clear(snap->window.background);
+  prism::raster::draw(canvas, *snap, fonts);
+
+  const auto b = PlayerUi::kBattery;
+  const std::uint32_t battery = 0xFF000000u | (b.r << 16) | (b.g << 8) | b.b;
+  const auto at = origin_of_list_with(*snap, PlayerUi::kTitleBar);
+  int found = 0;
+  for (int y = 0; y < static_cast<int>(PlayerUi::kTitleHeight); ++y)
+    for (int x = W / 2; x < W; ++x)
+      found += fb[static_cast<std::size_t>(at.y.raw() + y) * W + static_cast<std::size_t>(at.x.raw() + x)] == battery;
+  CHECK(found >= 20);
+}
+
+TEST_CASE("the Albums view shows each album's artist") {
+  Six f;
+  PlayerUi ui{f.library.get(), f.player};
+  press(ui, {Button::Select, Rotate{1}, Button::Select});
+  REQUIRE(ui.screen_title() == "Albums");
+  CHECK(shows(ui, "abba"));
+  CHECK(shows(ui, "Beta Band"));
+  const auto dl = drawn(ui);
+  const auto [artist, clip] = text_and_clip(dl, "abba");
+  REQUIRE(artist);
+  REQUIRE(clip);
+  // right-aligned: it ends where its box ends, before the chevron
+  CHECK(right_of(*clip) <= 320 - 24);
+  CHECK(artist->origin.x.raw() + prism::ui::text_width(nullptr, "abba", artist->size) ==
+        doctest::Approx(right_of(*clip)));
+}
+
+TEST_CASE("a very long title is cut before the battery") {
+  MemoryStorage s;
+  const std::string album(120, 'A');
+  add_song(s, "/music/x.mp3", "Song", "Someone", album, 1);
+  REQUIRE(Library::build(s, "/music", [](int) { return true; }));
+  const auto library = open_library(s);
+  FakeOutput out;
+  Player player{s, out};
+  PlayerUi ui{library.get(), player};
+  press(ui, {Button::Select, Rotate{1}, Button::Select, Button::Select});
+  REQUIRE(ui.screen_title() == album);
+  const auto dl = drawn(ui);
+  const auto [title, clip] = text_and_clip(dl, album);
+  REQUIRE(title);
+  REQUIRE(clip);
+  CHECK(right_of(*clip) <= 320 - 50);  // the battery starts 50 px from the right
+}
+
+TEST_CASE("the remaining time ends at the progress bar's right edge") {
+  MemoryStorage s;
+  add_song(s, "/music/sine.mp3", "Sine", "Tone", "Tests", 1, load("sine440_44k.mp3"));
+  REQUIRE(Library::build(s, "/music", [](int) { return true; }));
+  const auto library = open_library(s);
+  FakeOutput out;
+  Player player{s, out};
+  PlayerUi ui{library.get(), player};
+  press(ui, {Button::Select, Rotate{2}, Button::Select, Button::Select});
+  REQUIRE(ui.screen_title() == "Now Playing");
+  REQUIRE(player.status().state == Player::Status::State::Playing);
+  const auto dl = drawn(ui);
+  const auto [remaining, clip] = text_and_clip(dl, "-");
+  REQUIRE(remaining);
+  CHECK(remaining->origin.x.raw() + prism::ui::text_width(nullptr, remaining->text, remaining->size) ==
+        doctest::Approx(320 - 14));  // the bar has a 14 px margin
+}
+
+TEST_CASE("Now Playing with a stopped player says Nothing playing and why") {
+  Six f;
+  PlayerUi ui{f.library.get(), f.player};
+  press(ui, {Button::Select, Rotate{1}, Button::Select, Button::Select});
+  REQUIRE(ui.screen_title() == "Alpha");
+  press(ui, {Button::Select});
+  REQUIRE(ui.screen_title() == "Now Playing");
+  REQUIRE(f.player.status().state == Player::Status::State::Stopped);
+  CHECK(shows(ui, "Nothing playing"));
+  CHECK(shows(ui, "Cannot decode alpha.mp3"));
+  CHECK_FALSE(shows(ui, "Only"));
 }

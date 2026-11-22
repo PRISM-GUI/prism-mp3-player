@@ -31,6 +31,8 @@ public:
   static constexpr std::size_t kVisibleRows = 8;
   static constexpr int kVolumeSteps = 20;  // 5% per wheel step
   static constexpr core::Color kHighlight = core::Color::rgba(0x2F, 0x6F, 0xD0);
+  static constexpr core::Color kTitleBar = core::Color::rgba(0xE4, 0xE6, 0xEA);
+  static constexpr core::Color kBattery = core::Color::rgba(0x4A, 0x4E, 0x54);  // its outline
 
   struct Settings {
     std::vector<std::string> outputs{"Speakers"};
@@ -47,6 +49,12 @@ public:
     std::size_t selected = 0;
     std::size_t top = 0;  // the first visible row
   };
+
+  // A list row: its label, and a value shown right-aligned (a setting's, an album's artist).
+  struct Row {
+    std::string label, value;
+  };
+  struct Pen;  // where a screen draws (ui_draw.cpp)
 
   PlayerUi(Library*, Player&);  // library may be null ("No music")
 
@@ -81,11 +89,11 @@ private:
   void select_list_row();
   void play_from(std::size_t row);
 
-  void draw_title(render::DrawList&, float width) const;
-  void draw_menu(render::DrawList&, float width) const;
-  void draw_list(render::DrawList&, float width) const;
-  void draw_now_playing(render::DrawList&, float width) const;
-  std::vector<std::string> visible_rows() const;
+  void draw_title(const Pen&) const;
+  void draw_menu(const Pen&) const;
+  void draw_list(const Pen&) const;
+  void draw_now_playing(const Pen&) const;
+  std::vector<Row> visible_rows() const;
 
   Library* library_;
   Player& player_;
