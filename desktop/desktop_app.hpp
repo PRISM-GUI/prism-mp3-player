@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <thread>
 
@@ -45,7 +46,7 @@ public:
 
 private:
   void load_library(prism::app::AppContext&);
-  void use_library(std::shared_ptr<Library>);
+  void use_library(std::shared_ptr<Library>, std::string failure);
 
   std::jthread builder_;  // last: stopped and joined before the rest goes
 };

@@ -9,6 +9,7 @@ namespace keys = prism::input::keys;
 namespace {
 
 constexpr std::string_view kUpdating = "Updating library…";
+constexpr std::string_view kCannotWrite = "Cannot write the library index";
 
 // A fresh index of the card, or null when the build stopped or failed. On the builder thread.
 std::shared_ptr<Library> build_library(Storage& storage, const std::stop_token& stop) {
@@ -69,12 +70,15 @@ void DesktopApp::load_library(prism::app::AppContext& ctx) {
   builder_ = std::jthread([this, post = ctx.poster(), shown = library](std::stop_token stop) {
     if (shown && shown->is_current(storage, kMusicRoot)) return;
     post([this] { ui.set_library_status(std::string{kUpdating}); });
-    post([this, fresh = build_library(storage, stop)] { use_library(fresh); });
+    auto fresh = build_library(storage, stop);
+    std::string failure{fresh || stop.stop_requested() ? "" : kCannotWrite};
+    post([this, fresh = std::move(fresh), failure = std::move(failure)] { use_library(fresh, failure); });
   });
 }
 
-void DesktopApp::use_library(std::shared_ptr<Library> fresh) {
-  if (!fresh) return ui.set_library_status({});  // the build failed: keep what is shown
+// A failed build keeps what is shown and says why, unless it was stopped.
+void DesktopApp::use_library(std::shared_ptr<Library> fresh, std::string failure) {
+  if (!fresh) return ui.set_library_status(std::move(failure));
   ui.set_library(fresh.get());
   library = std::move(fresh);
 }

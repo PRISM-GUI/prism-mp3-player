@@ -7,8 +7,10 @@
 
 #include <prism/app/model_app.hpp>
 
+#include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <unistd.h>
 
 using namespace player;
 using namespace player::testing;
@@ -67,4 +69,34 @@ TEST_CASE("the desktop model runs 60 frames headless on a generated library") {
   CHECK(frames >= 60);
   CHECK(seen == State::Playing);
   CHECK(app.ui.screen_title() == "Now Playing");
+}
+
+TEST_CASE("a read-only music folder says the index cannot be written, not No music") {
+  if (::geteuid() == 0) return;  // root writes into a read-only folder anyway
+  namespace fs = std::filesystem;
+  TempDir dir;
+  write_song(dir, 1);
+  const auto music = dir.path / "music";
+  fs::permissions(music, fs::perms::owner_write, fs::perm_options::remove);
+  struct Writable {
+    fs::path p;
+    ~Writable() { fs::permissions(p, fs::perms::owner_write, fs::perm_options::add); }
+  } restore{music};
+
+  auto backend = prism::app::Backend::software(prism::app::RenderConfig{});
+  DesktopApp app{music};
+  auto& window = backend.create_window({.title = "read-only", .width = 600, .height = 300});
+  int frames = 0;
+  prism::app::model_app(backend, window, app, [&](prism::app::AppContext& ctx) {
+    app.start(ctx);
+    ctx.clock().add([&](auto) {
+      ++frames;
+      const bool done = app.ui.library_status() == "Cannot write the library index" || frames >= 600;
+      if (done) ctx.post_deferred([&ctx] { ctx.close_main_window(); });
+      return !done;
+    });
+  });
+
+  CHECK(app.library == nullptr);
+  CHECK(app.ui.library_status() == "Cannot write the library index");
 }
