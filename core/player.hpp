@@ -18,6 +18,8 @@ namespace player {
 // (the UI's logic thread and the audio thread that runs poll()): each one takes an internal lock,
 // and poll() decodes only a few frames per call so the UI never waits long for it. Only the ring
 // is shared with the output's own thread, and it is lock-free for that.
+// The thread that runs poll() must be joined before the Player goes: ~Player takes the lock and
+// stops the output, whose ring dies with us.
 // Tracks of the same format follow each other in the ring with no gap and no output restart.
 class Player {
 public:
@@ -43,6 +45,9 @@ public:
   Status status() const;
   // A copy: the queue stays behind the lock.
   std::vector<TrackRow> queue() const;
+  // The row the status points at, for drawing Now Playing: one copy rather than 5,000.
+  std::optional<TrackRow> current_track() const;
+  std::size_t queue_size() const;
 
 private:
   // A track in the ring, from sample `start` of the stream.
@@ -53,7 +58,7 @@ private:
     std::string message;  // the status message once it plays
   };
 
-  void start_at(std::size_t index);
+  void start_at(std::size_t index, std::size_t max_frames = std::numeric_limits<std::size_t>::max());
   void start_output();
   void pause_disconnected();
   std::string open_track(std::size_t index);
@@ -70,7 +75,7 @@ private:
   PcmOutput& output_;
   // Guards every member below: the UI's thread and the audio thread both call in.
   mutable std::mutex mutex_;
-  PcmRing ring_{2 * 48000 * 2};
+  PcmRing ring_{2 * 48000 * 2};  // read by the output's thread without the lock, by design
   std::vector<TrackRow> queue_;
   Status::State state_ = Status::State::Stopped;
   Track current_;

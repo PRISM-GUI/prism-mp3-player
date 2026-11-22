@@ -73,7 +73,7 @@ void Player::poll() {
   fill_ring(kFramesPerPoll);
   promote_played_tracks();
   // Reached only when the queue ends or the next track's format differs: the ring drained.
-  if (decoded_all_ && ring_.size() == 0) start_at(current_.index + 1);
+  if (decoded_all_ && ring_.size() == 0) start_at(current_.index + 1, kFramesPerPoll);
 }
 
 Player::Status Player::status() const {
@@ -86,9 +86,21 @@ std::vector<TrackRow> Player::queue() const {
   return queue_;
 }
 
+std::optional<TrackRow> Player::current_track() const {
+  const std::lock_guard lock(mutex_);
+  if (current_.index >= queue_.size()) return std::nullopt;
+  return queue_[current_.index];
+}
+
+std::size_t Player::queue_size() const {
+  const std::lock_guard lock(mutex_);
+  return queue_.size();
+}
+
 // Starts the first playable track from `index`; each one skipped leaves its reason as the
-// message, which the next normal start clears.
-void Player::start_at(std::size_t index) {
+// message, which the next normal start clears. `max_frames` caps what this refills: the public
+// commands pass the default (a whole ring), poll() passes its own budget so the UI never waits.
+void Player::start_at(std::size_t index, std::size_t max_frames) {
   halt();
   message_.clear();
   for (; index < queue_.size(); ++index) {
@@ -98,8 +110,8 @@ void Player::start_at(std::size_t index) {
     }
     format_ = decoder_->format();
     current_ = {index, 0, decoder_->duration_s(), {}};
-    push(first_frame_);
-    fill_ring();
+    push(first_frame_);  // a frame already decoded, so one off the budget
+    fill_ring(max_frames > 0 ? max_frames - 1 : 0);
     return start_output();
   }
   decoder_.reset();
@@ -145,10 +157,14 @@ void Player::fill_ring(std::size_t max_frames) {
     if (const auto pcm = decoder_->next_frame(); !pcm.empty()) {
       push(pcm);
       ++frames;
-    } else if (!chain_next()) {
+      continue;
+    }
+    if (!chain_next()) {
       decoded_all_ = true;
       ring_.finish();
+      continue;
     }
+    ++frames;  // the next track's first frame, which chain_next() just pushed
   }
 }
 

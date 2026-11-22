@@ -217,23 +217,23 @@ void PlayerUi::draw_list(const Pen& pen) const {
 
 void PlayerUi::draw_now_playing(const Pen& pen) const {
   const auto status = player_.status();
-  const auto& queue = player_.queue();
-  if (status.state == State::Stopped || status.index >= queue.size()) {
+  const auto track = player_.current_track();
+  const auto size = player_.queue_size();
+  if (status.state == State::Stopped || !track) {
     centred_note(pen, 100, "Nothing playing");
     if (!status.message.empty()) centred_note(pen, 126, status.message, kSmallText);
     return;
   }
-  const auto& track = queue[status.index];
   auto& dl = pen.dl;
   const float width = pen.width;
 
   dl.filled_rect(rect(14, 40, 100, 100), kCover);
   dl.rect_outline(rect(14, 40, 100, 100), kRule);
   const float x = 128, w = width - x - kPad;
-  clipped_text(dl, track.title, rect(x, 44, w, 22), 16.f, kInk, kBold);
-  clipped_text(dl, or_unknown(track.artist, "Unknown Artist"), rect(x, 70, w, 20), kText, kInk);
-  clipped_text(dl, or_unknown(track.album, "Unknown Album"), rect(x, 92, w, 20), kText, kGreyInk);
-  text(dl, std::format("{} of {}", status.index + 1, queue.size()), x, 116, kSmallText, kGreyInk);
+  clipped_text(dl, track->title, rect(x, 44, w, 22), 16.f, kInk, kBold);
+  clipped_text(dl, or_unknown(track->artist, "Unknown Artist"), rect(x, 70, w, 20), kText, kInk);
+  clipped_text(dl, or_unknown(track->album, "Unknown Album"), rect(x, 92, w, 20), kText, kGreyInk);
+  text(dl, std::format("{} of {}", status.index + 1, size), x, 116, kSmallText, kGreyInk);
   if (!status.message.empty()) clipped_text(dl, status.message, rect(14, 146, width - 28, 18), kSmallText, kGreyInk);
 
   const float bar_right = width - kBarMargin;

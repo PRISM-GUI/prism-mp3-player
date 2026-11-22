@@ -107,7 +107,7 @@ TEST_CASE("commands from another thread while poll runs") {
   audio.join();
 
   CHECK(commands > 0);
-  CHECK(consistent);  // every status and queue a command saw was a whole one
+  CHECK(consistent);  // no command saw an index outside the queue, or a queue that was not three
   const auto final = p.status();
   CHECK(final.index < 3);
   CHECK(p.queue().size() == 3U);

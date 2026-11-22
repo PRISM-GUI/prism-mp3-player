@@ -532,14 +532,49 @@ TEST_CASE("a poll decodes at most 8 frames") {
   CHECK(pushed <= 8 * 1152 * 2);  // 8 frames of 1152 stereo samples
 }
 
+// The 4 s track is longer than the 2 s ring, so play() cannot prefill all of it: every step
+// below really decodes. Run with kFramesPerPoll at 0, the ring drains and underruns() is not 0.
 TEST_CASE("a 5 ms poll cadence keeps up") {
   Fixture f;
   Player p{f.storage, f.out};
-  p.play({row("/44k.mp3")}, 0);
-  for (int step = 0; step < 200; ++step) {
+  p.play({row("/4s.mp3")}, 0);
+  REQUIRE(f.out.buffered() > 190'000);  // a nearly full ring, and 4 s of track behind it
+  int steps = 0;
+  for (; steps < 2000 && p.status().state != State::Stopped; ++steps) {
     p.poll();
     p.poll();
     f.out.pull(220);  // 5 ms of audio at 44.1 kHz
   }
+  CHECK(p.status().state == State::Stopped);
+  CHECK(steps > 700);  // the whole 4 s played, not a truncated run
   CHECK(f.out.underruns() == 0);
+}
+
+TEST_CASE("the restart at a format change respects the poll budget") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  p.play({row("/44k.mp3"), row("/48k.mp3")}, 0);
+  f.out.pull(50'000);  // drains the 1 s track; past its finish(), so no underrun is counted
+  REQUIRE(f.out.buffered() == 0);
+  p.poll();  // the queue moves on to the 48 kHz track
+  CHECK(p.status().index == 1);
+  CHECK(p.status().state == State::Playing);
+  CHECK(f.out.buffered() > 0);
+  CHECK(f.out.buffered() <= 8 * 1152 * 2);
+}
+
+TEST_CASE("current_track and queue_size follow play and next") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  CHECK_FALSE(p.current_track().has_value());
+  CHECK(p.queue_size() == 0U);
+  p.play({row("/44k.mp3"), row("/48k.mp3"), row("/44k.mp3")}, 1);
+  REQUIRE(p.current_track().has_value());
+  CHECK(p.current_track()->path == "/48k.mp3");
+  CHECK(p.queue_size() == 3U);
+  p.next();
+  REQUIRE(p.current_track().has_value());
+  CHECK(p.current_track()->path == "/44k.mp3");
+  CHECK(p.status().index == 2);
+  CHECK(p.current_track()->title == "t");
 }
