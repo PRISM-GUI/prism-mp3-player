@@ -64,7 +64,9 @@ public:
   // A rebuilt library replaces the old one: its lists leave the stack (to Main when one is on
   // screen).
   void set_library(Library*);
-  // What the Music screen says while there is no library ("Updating library…"); empty: No music.
+  // What a library is doing ("Updating library…"): the Music screen says it in place of No
+  // music, and with a library, the title bar of the library screens says it. set_library()
+  // clears it.
   void set_library_status(std::string);
 
   void canvas(render::DrawList&, core::Rect, const ui::WidgetNode&);

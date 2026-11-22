@@ -159,6 +159,7 @@ void PlayerUi::tick() {
 
 void PlayerUi::set_library(Library* library) {
   library_ = library;
+  library_status_.clear();
   if (here().screen == Screen::List) stack_ = {menu(Screen::Main)};
   std::erase_if(stack_, [](const Place& p) { return p.screen == Screen::List; });
   for (auto& p : stack_)

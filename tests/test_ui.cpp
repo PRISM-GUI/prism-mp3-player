@@ -278,6 +278,26 @@ TEST_CASE("while the library is built, the Music screen says so instead of No mu
   CHECK(shows(ui, "No music"));
 }
 
+TEST_CASE("while a stale library is rebuilt, its screens stay browsable and say so in the title bar") {
+  Six f;
+  PlayerUi ui{f.library.get(), f.player};
+  ui.set_library_status("Updating library…");
+  press(ui, {Button::Select});
+  CHECK(shows(ui, "Updating library…"));
+  CHECK(shows(ui, "Artists"));
+  press(ui, {Button::Select});
+  CHECK(ui.screen_title() == "Artists");
+  CHECK(shows(ui, "Updating library…"));
+  CHECK(shows(ui, "abba"));
+  press(ui, {Button::Menu, Button::Menu});
+  CHECK_FALSE(shows(ui, "Updating library…"));  // Main is no library screen
+
+  ui.set_library(f.library.get());  // the new library handed over
+  press(ui, {Button::Select});
+  CHECK_FALSE(shows(ui, "Updating library…"));
+  CHECK(shows(ui, "Music"));
+}
+
 TEST_CASE("a new library leaves its lists for Main") {
   Six f;
   PlayerUi ui{f.library.get(), f.player};

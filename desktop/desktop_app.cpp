@@ -8,6 +8,8 @@ namespace player {
 namespace keys = prism::input::keys;
 namespace {
 
+constexpr std::string_view kUpdating = "Updating library…";
+
 // A fresh index of the card, or null when the build stopped or failed. On the builder thread.
 std::shared_ptr<Library> build_library(Storage& storage, const std::stop_token& stop) {
   if (!Library::build(storage, kMusicRoot, [&](int) { return !stop.stop_requested(); })) return nullptr;
@@ -32,6 +34,9 @@ std::optional<WheelEvent> wheel_event_for_key(std::int32_t key) {
 
 void DesktopApp::start(prism::app::AppContext& ctx) {
   ctx.set_global_key_handler([this](const prism::input::KeyPress& k) { key(k); });
+  // simplify: the poll rides the frame clock, which stays active, so the logic thread wakes
+  // every frame even when nothing plays. Upgrade: a deadline timer that runs only
+  // while the player plays.
   ctx.clock().add([this](auto) {
     ui.tick();
     return true;
@@ -57,16 +62,19 @@ void DesktopApp::view(prism::app::ViewBuilder& vb) {
 void DesktopApp::load_library(prism::app::AppContext& ctx) {
   library = Library::open(storage, kMusicRoot);
   ui.set_library(library.get());
-  if (!library) ui.set_library_status("Updating library…");
+  if (!library) ui.set_library_status(std::string{kUpdating});  // at once: no "No music" before the builder says
+  // simplify: the freshness scan does not watch the stop token, so closing the app during it
+  // waits until it ends (seconds on a large card). Upgrade: a fingerprint() that takes a stop
+  // callback, as Library::build does.
   builder_ = std::jthread([this, post = ctx.poster(), shown = library](std::stop_token stop) {
     if (shown && shown->is_current(storage, kMusicRoot)) return;
+    post([this] { ui.set_library_status(std::string{kUpdating}); });
     post([this, fresh = build_library(storage, stop)] { use_library(fresh); });
   });
 }
 
 void DesktopApp::use_library(std::shared_ptr<Library> fresh) {
-  ui.set_library_status({});
-  if (!fresh) return;
+  if (!fresh) return ui.set_library_status({});  // the build failed: keep what is shown
   ui.set_library(fresh.get());
   library = std::move(fresh);
 }

@@ -6,7 +6,8 @@
 #include <filesystem>
 
 int main(int argc, char* argv[]) {
-  if (argc != 2 || !std::filesystem::is_directory(argv[1])) {
+  std::error_code error;
+  if (argc != 2 || !std::filesystem::is_directory(argv[1], error)) {
     std::fprintf(stderr, "usage: %s <music folder>\n", argv[0]);
     return 2;
   }

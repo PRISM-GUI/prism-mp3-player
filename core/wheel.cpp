@@ -54,7 +54,10 @@ std::vector<WheelEvent> WheelTracker::press(core::Point p) {
   return {};
 }
 
+// Leaving the wheel ends the press, as a finger lifting off a touch wheel: no turning resumes
+// on the way back, and a lost release leaves nothing held.
 std::vector<WheelEvent> WheelTracker::move(core::Point p) {
+  if (press_ && zone_of(p) == Zone::Outside) press_.reset();
   if (!press_ || press_->zone != Zone::Ring) return {};
   const double a = angle_of(p);
   press_->turned += angle_delta(press_->last_angle, a);

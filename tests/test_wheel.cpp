@@ -93,10 +93,21 @@ TEST_CASE("a ring press released outside the wheel is no tap") {
   CHECK(t.release(Point{X{300}, Y{100}}).empty());
 }
 
-TEST_CASE("a drag released outside the wheel ends: later moves do not rotate") {
+TEST_CASE("a drag that leaves the wheel ends there, as a finger lifting off a touch wheel") {
   WheelTracker t{ring};
   t.press(on_ring(0));
-  CHECK(steps_of(t.move(on_ring(30, 140))) == 2);  // dragged off the ring, still turning
+  CHECK(steps_of(t.move(on_ring(30, 140))) == 0);  // off the ring
   CHECK(t.release(Point{X{300}, Y{300}}).empty());
   CHECK(t.move(on_ring(90)).empty());
+}
+
+TEST_CASE("a drag that leaves and comes back, button held, turns only after a new press") {
+  WheelTracker t{ring};
+  t.press(on_ring(0));
+  CHECK(steps_of(t.move(on_ring(15))) == 1);
+  CHECK(t.move(on_ring(30, 140)).empty());  // off the wheel
+  for (int a = 40; a <= 120; a += 10) CHECK(t.move(on_ring(a)).empty());
+  CHECK(t.release(on_ring(120)).empty());  // no tap either
+  t.press(on_ring(120));
+  CHECK(steps_of(t.move(on_ring(150))) == 2);
 }

@@ -19,7 +19,7 @@ using WheelEvent = std::variant<Rotate, Button>;
 // A finger or mouse on a drawn ring: angle in, events out. 24 steps per turn (the iPod's feel:
 // one list row per 15°). Taps: centre = Select; top/bottom/left/right of the ring = Menu,
 // PlayPause, Previous, Next. A press that turns the wheel by a step is not a tap, nor one
-// released outside the wheel.
+// released outside the wheel. A pointer leaving the wheel ends the press.
 class WheelTracker {
 public:
   static constexpr double kStepDegrees = 15.0;

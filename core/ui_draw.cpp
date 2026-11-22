@@ -165,7 +165,9 @@ void PlayerUi::draw_title(const Pen& pen) const {
   const float width = pen.width;
   pen.dl.filled_rect(rect(0, 0, width, kTitleHeight), kTitleBar);
   pen.dl.filled_rect(rect(0, kTitleHeight - 1, width, 1), kRule);
-  centred_text(pen, std::string{screen_title()}, rect(kTitleReserve, 0, width - 2 * kTitleReserve, kTitleHeight - 1),
+  const bool library_screen = here().screen == Screen::Music || here().screen == Screen::List;
+  const bool updating = library_ && library_screen && !library_status_.empty();
+  centred_text(pen, updating ? library_status_ : std::string{screen_title()}, rect(kTitleReserve, 0, width - 2 * kTitleReserve, kTitleHeight - 1),
                kText, kInk, kBold);
   battery(pen.dl, width - 50, 7);
   const auto state = player_.status().state;
