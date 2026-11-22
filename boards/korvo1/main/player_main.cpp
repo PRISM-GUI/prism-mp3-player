@@ -45,6 +45,7 @@ constexpr std::string_view kUpdating = "Updating library…";
 constexpr std::string_view kCannotWrite = "Cannot write the library index";
 constexpr std::string_view kCannotOpen = "Cannot open the library index";
 constexpr std::string_view kNoCard = "No SD card";
+constexpr std::string_view kUnreadable = "SD card not readable (FAT32 or exFAT)";
 constexpr std::uint32_t kBuilderStack = 32768;
 constexpr std::uint32_t kPollStack = 32768;
 constexpr std::chrono::milliseconds kPollEvery{5};
@@ -232,13 +233,14 @@ void handle_presses(std::vector<BoardButton>& buttons, player::PlayerUi& ui) {
     if (b.button.pressed()) ui.handle(b.event);
 }
 
-// The card at /sdcard, or false after saying why: the UI then says "No SD card" and the player
-// runs with no library, rather than waiting on the card.
-bool mount_card() {
+// The card at /sdcard, or the reason to show instead: the player then runs with no library, rather
+// than waiting on the card. ESP_FAIL is a card that answers but carries no FAT32 or exFAT volume,
+// so nothing mounts: that is a card from another filesystem, or one the board cannot read at all.
+std::string_view mount_card() {
   const esp_err_t mounted = bsp_sdcard_mount();
-  if (mounted == ESP_OK) return true;
+  if (mounted == ESP_OK) return {};
   std::printf("sd card: %s\n", esp_err_to_name(mounted));
-  return false;
+  return mounted == ESP_FAIL ? kUnreadable : kNoCard;
 }
 
 // The headset's buttons arrive on the Bluetooth task: they wait here until the logic loop hands
@@ -325,7 +327,8 @@ extern "C" void app_main() {
   auto display = korvo1::BandDisplay::open();
   if (!display) korvo1::halt(display.error());
   korvo1::Touch input = korvo1::open_touch_or_none();
-  const bool card = mount_card();
+  const auto card_problem = mount_card();
+  const bool card = card_problem.empty();
 
   static PlayerModel model;
   static RemoteButtons remote;
@@ -336,7 +339,7 @@ extern "C" void app_main() {
     player::save_output_choice(static_cast<player::OutputChoice>(choice));
     std::printf("player: output %zu saved for the next start\n", choice);
   });
-  if (!card) model.ui.set_library_status(std::string{kNoCard});
+  if (!card) model.ui.set_library_status(std::string{card_problem});
   else model.ui.set_storage(&model.storage);  // Folders browses the card with or without an index
   model.ui.poll_on_tick(false);  // the poll thread does that now
   if (auto* radio = model.outputs.radio)

@@ -34,3 +34,9 @@ background when the folder changed. With no folder given, it prints its usage an
 
 With the mouse: drag around the ring to turn it, click the centre or the ring's four buttons,
 or roll the mouse wheel over the click wheel. In Now Playing, turning the wheel sets the volume.
+
+## The Korvo-1 board
+
+The same player runs on an ESP32-S3 Korvo-1 board: SD card, touch wheel, and Bluetooth headphones
+or the board's speaker. [boards/korvo1/README.md](boards/korvo1/README.md) has the build, the card
+format, pairing and the console status line.
