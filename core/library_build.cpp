@@ -1,6 +1,6 @@
 // Scans a card and writes its index; the byte layout is described at the top of library.cpp.
 // Memory: every string goes once into one pool (artist and album names once per distinct
-// name), tracks are 28-byte records, and the file is streamed out in two passes (the CRC
+// name), tracks are 32-byte records, and the file is streamed out in two passes (the CRC
 // first, then the bytes), so 10,000 tracks peak around 2 MB.
 #include "core/fold.hpp"
 #include "core/index_format.hpp"
