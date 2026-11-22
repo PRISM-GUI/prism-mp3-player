@@ -32,7 +32,7 @@ public:
   static constexpr float kScreenHeight = 240.f;
   static constexpr float kTitleHeight = 26.f;
   static constexpr float kRowHeight = 26.f;
-  static constexpr std::size_t kVisibleRows = 8;
+  static constexpr std::size_t kVisibleRows = 8;  // on a 240-high screen; a taller one shows more
   static constexpr int kVolumeSteps = 20;  // 5% per wheel step
   static constexpr core::Color kHighlight = core::Color::rgba(0x2F, 0x6F, 0xD0);
   static constexpr core::Color kTitleBar = core::Color::rgba(0xE4, 0xE6, 0xEA);
@@ -126,12 +126,14 @@ private:
   void draw_list(const Pen&) const;
   void draw_now_playing(const Pen&) const;
   std::vector<Row> visible_rows() const;
+  void fit_rows(float height);
 
   Library* library_;
   Storage* storage_ = nullptr;  // the card, for Folders; not the same as the library
   Player& player_;
   int volume_ = kVolumeSteps / 2;
   bool polls_on_tick_ = true;
+  std::size_t rows_on_screen_ = kVisibleRows;  // what the last drawn canvas had room for
   std::vector<Place> stack_;
   std::string library_status_;
   std::function<void(std::size_t)> output_changed_;  // the board's, to save the choice

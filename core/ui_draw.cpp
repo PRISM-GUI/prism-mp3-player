@@ -118,12 +118,12 @@ void draw_row(const Pen& pen, float width, std::size_t visible_index, bool selec
   if (opens) chevron(pen.dl, width - 18.f, y + PlayerUi::kRowHeight / 2, ink);
 }
 
-void draw_scrollbar(DrawList& dl, float width, float height, const PlayerUi::Place& p) {
-  if (p.count <= PlayerUi::kVisibleRows) return;
+void draw_scrollbar(DrawList& dl, float width, float height, const PlayerUi::Place& p, std::size_t rows) {
+  if (p.count <= rows) return;
   const float track_h = height - PlayerUi::kTitleHeight;
-  const float thumb_h = std::max(12.f, track_h * PlayerUi::kVisibleRows / static_cast<float>(p.count));
+  const float thumb_h = std::max(12.f, track_h * static_cast<float>(rows) / static_cast<float>(p.count));
   const float thumb_y = (track_h - thumb_h) * static_cast<float>(p.top) /
-                        static_cast<float>(p.count - PlayerUi::kVisibleRows);
+                        static_cast<float>(p.count - rows);
   dl.filled_rect(rect(width - 6, PlayerUi::kTitleHeight, 6, track_h), kTrack);
   dl.filled_rect(rect(width - 6, PlayerUi::kTitleHeight + thumb_y, 6, thumb_h), kRule);
 }
@@ -146,6 +146,7 @@ std::string or_unknown(std::string s, std::string_view unknown) { return s.empty
 }  // namespace
 
 void PlayerUi::canvas(render::DrawList& dl, core::Rect bounds, const ui::WidgetNode& node) {
+  fit_rows(bounds.extent.h.raw());
   const Pen pen{dl, node.theme ? node.theme->measurer : nullptr, bounds.extent.w.raw()};
   dl.filled_rect(rect(0, 0, pen.width, bounds.extent.h.raw()), kWhite);
   draw_title(pen);
@@ -155,7 +156,7 @@ void PlayerUi::canvas(render::DrawList& dl, core::Rect bounds, const ui::WidgetN
     case Screen::NowPlaying: draw_now_playing(pen); break;
     default: draw_menu(pen); break;
   }
-  draw_scrollbar(dl, pen.width, bounds.extent.h.raw(), here());
+  draw_scrollbar(dl, pen.width, bounds.extent.h.raw(), here(), rows_on_screen_);
 }
 
 void PlayerUi::view(app::ViewBuilder& vb) {
@@ -182,7 +183,7 @@ void PlayerUi::draw_menu(const Pen& pen) const {
   const auto note = [&] { return library_status_.empty() ? std::string{"No music"} : library_status_; };
   if (rows.empty()) return centred_note(pen, 110, note());
   const bool opens = p.screen != Screen::Settings;
-  for (std::size_t i = p.top; i < std::min(rows.size(), p.top + kVisibleRows); ++i) {
+  for (std::size_t i = p.top; i < std::min(rows.size(), p.top + rows_on_screen_); ++i) {
     Row row{rows[i], {}};
     if (p.screen == Screen::Settings)
       row.value = i == 0 ? (settings.outputs.empty() ? "" : settings.outputs[settings.output]) : settings.bluetooth;
@@ -201,17 +202,17 @@ std::vector<PlayerUi::Row> PlayerUi::visible_rows() const {
   const auto& p = here();
   if (p.screen == Screen::Folders) {
     const auto top = std::min(p.top, p.rows.size());
-    const auto end = std::min(top + kVisibleRows, p.rows.size());
+    const auto end = std::min(top + rows_on_screen_, p.rows.size());
     return {p.rows.begin() + static_cast<std::ptrdiff_t>(top),
             p.rows.begin() + static_cast<std::ptrdiff_t>(end)};
   }
   std::vector<Row> rows;
   if (is_song_view(p.key.view)) {
-    for (auto& t : library_->tracks(p.key, p.top, kVisibleRows)) rows.push_back({std::move(t.title), {}});
+    for (auto& t : library_->tracks(p.key, p.top, rows_on_screen_)) rows.push_back({std::move(t.title), {}});
     return rows;
   }
   const auto unknown = p.key.view == View::Artists ? "Unknown Artist" : "Unknown Album";
-  for (auto& n : library_->names(p.key, p.top, kVisibleRows)) rows.push_back({or_unknown(std::move(n), unknown), {}});
+  for (auto& n : library_->names(p.key, p.top, rows_on_screen_)) rows.push_back({or_unknown(std::move(n), unknown), {}});
   if (p.key.view != View::Albums) return rows;
   const auto artists = library_->album_artists(p.key, p.top, rows.size());
   for (std::size_t i = 0; i < std::min(rows.size(), artists.size()); ++i)

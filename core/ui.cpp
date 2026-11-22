@@ -73,16 +73,31 @@ std::string_view folder_name(std::string_view dir) {
   return slash == std::string_view::npos ? dir : dir.substr(slash + 1);
 }
 
+// Keeps `selected` on the `rows` on screen.
+void keep_on_screen(PlayerUi::Place& p, std::size_t rows) {
+  if (p.selected < p.top) p.top = p.selected;
+  if (p.selected >= p.top + rows) p.top = p.selected + 1 - rows;
+}
+
 // Keeps `selected` in [0, count) and on screen.
-void move_selection(PlayerUi::Place& p, long steps) {
+void move_selection(PlayerUi::Place& p, long steps, std::size_t rows) {
   if (p.count == 0) return;
   const long last = static_cast<long>(p.count) - 1;
   p.selected = static_cast<std::size_t>(std::clamp(static_cast<long>(p.selected) + steps, 0L, last));
-  if (p.selected < p.top) p.top = p.selected;
-  if (p.selected >= p.top + PlayerUi::kVisibleRows) p.top = p.selected + 1 - PlayerUi::kVisibleRows;
+  keep_on_screen(p, rows);
 }
 
 }  // namespace
+
+// The rows that fit under the title bar of a canvas `height` high; the view scrolls so the
+// selected row stays among them. PRISM records a canvas once before layout, with no size: a canvas
+// with no room for a row keeps the count it had.
+void PlayerUi::fit_rows(float height) {
+  const auto rows = static_cast<std::size_t>(std::max(0.f, (height - kTitleHeight) / kRowHeight));
+  if (rows == 0) return;
+  rows_on_screen_ = rows;
+  keep_on_screen(here(), rows_on_screen_);
+}
 
 PlayerUi::PlayerUi(Library* library, Player& player) : library_(library), player_(player) {
   stack_.push_back(menu(Screen::Main));
@@ -139,7 +154,7 @@ void PlayerUi::handle(WheelEvent e) {
 }
 
 void PlayerUi::rotate(int steps) {
-  if (here().screen != Screen::NowPlaying) return move_selection(here(), steps);
+  if (here().screen != Screen::NowPlaying) return move_selection(here(), steps, rows_on_screen_);
   volume_ = std::clamp(volume_ + steps, 0, kVolumeSteps);
   player_.set_volume(static_cast<float>(volume_) / kVolumeSteps);
 }

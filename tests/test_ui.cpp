@@ -93,17 +93,18 @@ std::unique_ptr<Library> open_library(Storage& s) {
   return lib;
 }
 
-// What the UI draws on its 320×240 canvas, with no text measurer (0.6 em per character).
-prism::render::DrawList drawn(PlayerUi& ui) {
+// What the UI draws on a 320-wide canvas, 240 high unless told, with no text measurer (0.6 em
+// per character).
+prism::render::DrawList drawn(PlayerUi& ui, float height = 240) {
   prism::render::DrawList dl;
   prism::ui::WidgetNode node;
-  ui.canvas(dl, Rect{Point{X{0}, Y{0}}, Size{Width{320}, Height{240}}}, node);
+  ui.canvas(dl, Rect{Point{X{0}, Y{0}}, Size{Width{320}, Height{height}}}, node);
   return dl;
 }
 
 // The texts the UI draws.
-std::vector<std::string> texts(PlayerUi& ui) {
-  const auto dl = drawn(ui);
+std::vector<std::string> texts(PlayerUi& ui, float height = 240) {
+  const auto dl = drawn(ui, height);
   std::vector<std::string> out;
   for (const auto& cmd : dl.commands)
     if (const auto* t = std::get_if<prism::render::TextCmd>(&cmd)) out.push_back(t->text);
@@ -454,6 +455,41 @@ TEST_CASE("10,000 songs: 9,999 steps reach the last song and only visible rows w
               storage.bytes_read);
   CHECK(storage.bytes_read <= 16 * 1024);
   CHECK(index_size >= 16 * storage.bytes_read);
+}
+
+TEST_CASE("a taller screen fills its height with rows, and scrolls by what it shows") {
+  CountingStorage storage{ten_thousand_songs()};
+  const auto library = open_library(storage);
+  FakeOutput out;
+  Player player{storage, out};
+  PlayerUi ui{library.get(), player};
+  press(ui, {Button::Select, Rotate{3}, Button::Select});
+  REQUIRE(ui.screen_title() == "Songs");
+
+  const float height = PlayerUi::kTitleHeight + 11 * PlayerUi::kRowHeight + 10;  // 11 rows fit
+  auto shown = texts(ui, height);
+  CHECK(contains(shown, "Song 00010"));
+  CHECK_FALSE(contains(shown, "Song 00011"));
+
+  press(ui, {Rotate{10}});
+  CHECK(contains(texts(ui, height), "Song 00000"));  // the 11th row is on screen: no scroll yet
+  press(ui, {Rotate{1}});
+  shown = texts(ui, height);
+  CHECK(contains(shown, "Song 00011"));
+  CHECK_FALSE(contains(shown, "Song 00000"));
+}
+
+TEST_CASE("a screen drawn shorter keeps the selected row on it") {
+  CountingStorage storage{ten_thousand_songs()};
+  const auto library = open_library(storage);
+  FakeOutput out;
+  Player player{storage, out};
+  PlayerUi ui{library.get(), player};
+  press(ui, {Button::Select, Rotate{3}, Button::Select});
+  const float tall = PlayerUi::kTitleHeight + 11 * PlayerUi::kRowHeight;
+  texts(ui, tall);
+  press(ui, {Rotate{10}});
+  CHECK(contains(texts(ui, 240), "Song 00010"));  // 8 rows now: the view follows the selection
 }
 
 TEST_CASE("Select on a song plays the album from that song") {
