@@ -18,6 +18,9 @@ namespace player {
 class Player {
 public:
   Player(Storage& storage, PcmOutput& output) : storage_(storage), output_(output) {}
+  ~Player() { output_.stop(); }  // the output reads our ring: it stops before the ring goes
+  Player(const Player&) = delete;
+  Player& operator=(const Player&) = delete;
 
   void play(std::vector<TrackRow> queue, std::size_t index);
   void toggle_pause();

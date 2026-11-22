@@ -380,3 +380,13 @@ TEST_CASE("PcmRing: a short read after finish() is the end of the stream, not an
   ring.pop(out);
   CHECK(ring.underruns() == 1);
 }
+
+TEST_CASE("a player going away stops its output: the ring it reads goes with the player") {
+  Fixture f;
+  {
+    Player p{f.storage, f.out};
+    p.play({row("/44k.mp3")}, 0);
+    REQUIRE(f.out.started());
+  }
+  CHECK_FALSE(f.out.started());
+}

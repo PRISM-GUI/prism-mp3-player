@@ -68,9 +68,10 @@ std::vector<WheelEvent> WheelTracker::move(core::Point p) {
 
 std::vector<WheelEvent> WheelTracker::release(core::Point p) {
   const auto pressed = std::exchange(press_, std::nullopt);
-  if (!pressed || pressed->rotated) return {};
+  const auto zone = zone_of(p);
+  if (!pressed || pressed->rotated || zone == Zone::Outside) return {};
   if (pressed->zone == Zone::Centre)
-    return zone_of(p) == Zone::Centre ? std::vector<WheelEvent>{Button::Select} : std::vector<WheelEvent>{};
+    return zone == Zone::Centre ? std::vector<WheelEvent>{Button::Select} : std::vector<WheelEvent>{};
   return {ring_button(pressed->at)};
 }
 

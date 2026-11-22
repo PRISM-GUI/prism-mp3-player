@@ -86,3 +86,17 @@ TEST_CASE("a drag that starts in the centre does not rotate") {
   for (int a = 0; a <= 360; a += 10) CHECK(t.move(on_ring(a)).empty());
   CHECK(t.release(on_ring(360)).empty());
 }
+
+TEST_CASE("a ring press released outside the wheel is no tap") {
+  WheelTracker t{ring};
+  t.press(on_ring(-90));
+  CHECK(t.release(Point{X{300}, Y{100}}).empty());
+}
+
+TEST_CASE("a drag released outside the wheel ends: later moves do not rotate") {
+  WheelTracker t{ring};
+  t.press(on_ring(0));
+  CHECK(steps_of(t.move(on_ring(30, 140))) == 2);  // dragged off the ring, still turning
+  CHECK(t.release(Point{X{300}, Y{300}}).empty());
+  CHECK(t.move(on_ring(90)).empty());
+}
