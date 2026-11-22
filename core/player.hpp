@@ -6,23 +6,27 @@
 #include "core/storage.hpp"
 
 #include <deque>
+#include <limits>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace player {
 
-// Plays a queue of tracks into a PcmOutput. Has no thread: the app calls every method,
-// poll() included, from one logic thread; only the ring is shared with the output's thread.
+// Plays a queue of tracks into a PcmOutput. Its methods may be called from more than one thread
+// (the UI's logic thread and the audio thread that runs poll()): each one takes an internal lock,
+// and poll() decodes only a few frames per call so the UI never waits long for it. Only the ring
+// is shared with the output's own thread, and it is lock-free for that.
 // Tracks of the same format follow each other in the ring with no gap and no output restart.
 class Player {
 public:
   Player(Storage& storage, PcmOutput& output) : storage_(storage), output_(output) {}
-  ~Player() { output_.stop(); }  // the output reads our ring: it stops before the ring goes
+  ~Player();  // the output reads our ring: it stops before the ring goes
   Player(const Player&) = delete;
   Player& operator=(const Player&) = delete;
 
-  void play(std::vector<TrackRow> queue, std::size_t index);
+  void play(std::vector<TrackRow> tracks, std::size_t index);
   void toggle_pause();
   void next();
   void previous();  // restarts the track if more than 3 s in, else plays the one before
@@ -37,7 +41,8 @@ public:
     std::string message;  // why a track was skipped or playback paused; empty when all is well
   };
   Status status() const;
-  const std::vector<TrackRow>& queue() const { return queue_; }
+  // A copy: the queue stays behind the lock.
+  std::vector<TrackRow> queue() const;
 
 private:
   // A track in the ring, from sample `start` of the stream.
@@ -52,7 +57,8 @@ private:
   void start_output();
   void pause_disconnected();
   std::string open_track(std::size_t index);
-  void fill_ring();
+  // Decodes at most `max_frames` frames; the whole ring's worth unless told otherwise.
+  void fill_ring(std::size_t max_frames = std::numeric_limits<std::size_t>::max());
   bool chain_next();
   void push(std::span<const std::int16_t> pcm);
   void promote_played_tracks();
@@ -62,6 +68,8 @@ private:
 
   Storage& storage_;
   PcmOutput& output_;
+  // Guards every member below: the UI's thread and the audio thread both call in.
+  mutable std::mutex mutex_;
   PcmRing ring_{2 * 48000 * 2};
   std::vector<TrackRow> queue_;
   Status::State state_ = Status::State::Stopped;

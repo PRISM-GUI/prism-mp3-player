@@ -13,6 +13,10 @@ test('player', executable('test_player', files('test_player.cpp'),
   cpp_args : '-DTEST_DATA_DIR="@0@"'.format(meson.current_source_dir() / 'data'),
   dependencies : [player_core_dep, doctest_dep]))
 
+test('player_threads', executable('test_player_threads', files('test_player_threads.cpp'),
+  cpp_args : '-DTEST_DATA_DIR="@0@"'.format(meson.current_source_dir() / 'data'),
+  dependencies : [player_core_dep, doctest_dep]))
+
 test('wheel', executable('test_wheel', files('test_wheel.cpp'),
   dependencies : [player_core_dep, doctest_dep]))
 

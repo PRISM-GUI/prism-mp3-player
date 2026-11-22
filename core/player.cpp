@@ -15,22 +15,37 @@ std::string_view file_name(std::string_view path) {
 
 bool supported_rate(int hz) { return hz == 44100 || hz == 48000; }
 
+// poll() decodes this many frames at most: a few milliseconds of audio, so a command from the UI
+// never waits behind a long decode.
+constexpr std::size_t kFramesPerPoll = 8;
+
 }  // namespace
 
 using State = Player::Status::State;
 
-void Player::play(std::vector<TrackRow> queue, std::size_t index) {
-  queue_ = std::move(queue);
+Player::~Player() {
+  const std::lock_guard lock(mutex_);
+  output_.stop();
+}
+
+void Player::play(std::vector<TrackRow> tracks, std::size_t index) {
+  const std::lock_guard lock(mutex_);
+  queue_ = std::move(tracks);
   start_at(index);
 }
 
-void Player::next() { start_at(current_.index + 1); }
+void Player::next() {
+  const std::lock_guard lock(mutex_);
+  start_at(current_.index + 1);
+}
 
 void Player::previous() {
+  const std::lock_guard lock(mutex_);
   start_at(position_s() > 3.0 || current_.index == 0 ? current_.index : current_.index - 1);
 }
 
 void Player::toggle_pause() {
+  const std::lock_guard lock(mutex_);
   switch (state_) {
     case State::Playing:
       output_.stop();
@@ -46,19 +61,29 @@ void Player::toggle_pause() {
   }
 }
 
-void Player::set_volume(float volume) { output_.set_volume(std::clamp(volume, 0.0f, 1.0f)); }
+void Player::set_volume(float volume) {
+  const std::lock_guard lock(mutex_);
+  output_.set_volume(std::clamp(volume, 0.0f, 1.0f));
+}
 
 void Player::poll() {
+  const std::lock_guard lock(mutex_);
   if (state_ != State::Playing) return;
   if (!output_.connected()) return pause_disconnected();
-  fill_ring();
+  fill_ring(kFramesPerPoll);
   promote_played_tracks();
   // Reached only when the queue ends or the next track's format differs: the ring drained.
-  if (decoded_all_ && ring_.size() == 0) next();
+  if (decoded_all_ && ring_.size() == 0) start_at(current_.index + 1);
 }
 
 Player::Status Player::status() const {
+  const std::lock_guard lock(mutex_);
   return {state_, current_.index, position_s(), current_.duration_s, message_};
+}
+
+std::vector<TrackRow> Player::queue() const {
+  const std::lock_guard lock(mutex_);
+  return queue_;
 }
 
 // Starts the first playable track from `index`; each one skipped leaves its reason as the
@@ -114,10 +139,12 @@ std::string Player::open_track(std::size_t index) {
   return {};
 }
 
-void Player::fill_ring() {
-  while (!decoded_all_ && ring_.free_space() >= MINIMP3_MAX_SAMPLES_PER_FRAME) {
+void Player::fill_ring(std::size_t max_frames) {
+  for (std::size_t frames = 0; !decoded_all_ && frames < max_frames &&
+                              ring_.free_space() >= MINIMP3_MAX_SAMPLES_PER_FRAME;) {
     if (const auto pcm = decoder_->next_frame(); !pcm.empty()) {
       push(pcm);
+      ++frames;
     } else if (!chain_next()) {
       decoded_all_ = true;
       ring_.finish();

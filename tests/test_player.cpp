@@ -65,6 +65,7 @@ public:
     for (std::size_t i = 0; i < buf.size(); i += 2) left.push_back(buf[i]);
   }
   bool started() const { return ring_ != nullptr; }
+  std::size_t buffered() const { return ring_ ? ring_->size() : 0; }
   PcmFormat format() const { return format_; }
 
   std::set<int> rates{44100, 48000};
@@ -517,4 +518,28 @@ TEST_CASE("a VBRI header's frame count gives a VBR file's duration") {
 TEST_CASE("a Xing header without a frame count falls back to the bitrate") {
   const std::vector<std::byte> no_flags(8);
   CHECK(first_frame_duration(vbr_file(4 + 32, "Xing", no_flags)) == doctest::Approx(21 * 417 * 8 / 128000.0));
+}
+
+TEST_CASE("a poll decodes at most 8 frames") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  p.play({row("/4s.mp3")}, 0);
+  f.out.pull(20'000);  // makes room, so a poll that ignores the cap shows in the count
+  const auto before = f.out.buffered();
+  p.poll();  // nothing pulls during it
+  const auto pushed = f.out.buffered() - before;
+  CHECK(pushed > 0);
+  CHECK(pushed <= 8 * 1152 * 2);  // 8 frames of 1152 stereo samples
+}
+
+TEST_CASE("a 5 ms poll cadence keeps up") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  p.play({row("/44k.mp3")}, 0);
+  for (int step = 0; step < 200; ++step) {
+    p.poll();
+    p.poll();
+    f.out.pull(220);  // 5 ms of audio at 44.1 kHz
+  }
+  CHECK(f.out.underruns() == 0);
 }
