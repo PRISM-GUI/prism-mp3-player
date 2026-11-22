@@ -28,6 +28,8 @@ namespace ui = prism::ui;
 // the one that also runs the Player.
 class PlayerUi {
 public:
+  static constexpr float kScreenWidth = 320.f;
+  static constexpr float kScreenHeight = 240.f;
   static constexpr float kTitleHeight = 26.f;
   static constexpr float kRowHeight = 26.f;
   static constexpr std::size_t kVisibleRows = 8;
@@ -142,7 +144,8 @@ public:
   explicit WheelWidget(PlayerUi& ui) : ui_(ui) {}
   void canvas(render::DrawList&, core::Rect, const ui::WidgetNode&);
   void handle_canvas_input(const input::InputEvent&, ui::WidgetNode&, core::Rect);
-  void view(app::ViewBuilder&);
+  // The ring is the largest that fits in `size`, centred.
+  void view(app::ViewBuilder&, core::Size size = {core::Width{200}, core::Height{200}});
 
 private:
   PlayerUi& ui_;

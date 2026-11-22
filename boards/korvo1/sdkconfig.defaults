@@ -60,3 +60,8 @@ CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y
 # as they are in the tags. 437 stays as the fallback for names that are not UTF-8.
 CONFIG_FATFS_API_ENCODING_UTF_8=y
 CONFIG_FATFS_CODEPAGE_437=y
+
+# Held upright, as an iPod Classic: the 480x800 frame, the screen on top and the wheel below it.
+# The board turned clockwise (the panel's left edge on top); _270 if it is held the other way.
+# The bands stay 16 rows, which divides 800: 15 KB each in internal RAM.
+CONFIG_PRISM_DISPLAY_ROTATION_90=y

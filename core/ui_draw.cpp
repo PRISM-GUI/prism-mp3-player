@@ -159,7 +159,7 @@ void PlayerUi::canvas(render::DrawList& dl, core::Rect bounds, const ui::WidgetN
 }
 
 void PlayerUi::view(app::ViewBuilder& vb) {
-  vb.canvas(*this).min_size(Width{320}).min_size(Height{240}).depends_on(revision);
+  vb.canvas(*this).min_size(Width{kScreenWidth}).min_size(Height{kScreenHeight}).depends_on(revision);
 }
 
 void PlayerUi::draw_title(const Pen& pen) const {
@@ -319,8 +319,8 @@ void WheelWidget::handle_canvas_input(const input::InputEvent& ev, ui::WidgetNod
   for (const auto& e : events) ui_.handle(e);
 }
 
-void WheelWidget::view(app::ViewBuilder& vb) {
-  vb.canvas(*this).min_size(Width{200}).min_size(Height{200});
+void WheelWidget::view(app::ViewBuilder& vb, core::Size size) {
+  vb.canvas(*this).min_size(size.w).min_size(size.h);
 }
 
 }  // namespace player

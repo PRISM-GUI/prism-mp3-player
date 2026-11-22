@@ -1,5 +1,6 @@
-// The player on the Korvo-1's 800x480 panel: the 320x240 screen beside a touch click wheel, as
-// on the desktop. The MP3s are the card's, from its root down, indexed on a thread of its own; the
+// The player on the Korvo-1's 800x480 panel: the 320x240 screen and a touch click wheel, the
+// wheel under the screen when the board is held upright (CONFIG_PRISM_DISPLAY_ROTATION_90, as an
+// iPod Classic), beside it otherwise, as on the desktop. The MP3s are the card's, from its root down, indexed on a thread of its own; the
 // sound goes to a Bluetooth headset (bt_output.cpp) or the board's own speaker
 // (speaker_output.cpp), whichever the setting read at boot names, and is decoded on a third
 // thread. The board's MODE button is Menu, VOL+ and VOL- turn the wheel.
@@ -196,14 +197,31 @@ struct PlayerModel {
   player::PlayerUi ui{nullptr, player};
   player::WheelWidget wheel{ui};
   LibraryLoader loader{storage};
+  prism::core::Size frame{};  // the display in layout units, set before the runtime starts
 
   void view(prism::app::ViewBuilder& vb) {
-    vb.hstack([&] {
-      ui.view(vb);
-      wheel.view(vb);
-    });
+    if (frame.h.raw() > frame.w.raw())
+      vb.vstack([&] {
+        ui.view(vb);
+        wheel.view(vb, under_screen());
+      });
+    else
+      vb.hstack([&] {
+        ui.view(vb);
+        wheel.view(vb);
+      });
+  }
+
+  // All the frame below the screen: the wheel is as large as fits there.
+  prism::core::Size under_screen() const {
+    return {frame.w, prism::core::Height{frame.h.raw() - player::PlayerUi::kScreenHeight}};
   }
 };
+
+// The display's size in layout units: its pixels over the UI scale.
+prism::core::Size layout_frame(prism::core::Size pixels, float ui_scale) {
+  return {prism::core::Width{pixels.w.raw() / ui_scale}, prism::core::Height{pixels.h.raw() / ui_scale}};
+}
 
 struct BoardButton {
   korvo1::Button button;
@@ -332,6 +350,8 @@ extern "C" void app_main() {
 
   static PlayerModel model;
   static RemoteButtons remote;
+  const auto options = korvo1::pinned_threads();
+  model.frame = layout_frame(display->size(), options.ui_scale);
   // In OutputChoice order: the index in the list is the stored byte.
   model.ui.settings.outputs = {"Bluetooth", "Speaker"};
   model.ui.settings.output = static_cast<std::size_t>(model.outputs.choice);
@@ -358,6 +378,6 @@ extern "C" void app_main() {
     });
     ctx.on_loop([] { print_status_line(model); });
     ctx.on_stats(korvo1::print_stats);
-  }, korvo1::pinned_threads());
+  }, options);
   korvo1::halt_runtime_stopped();
 }
