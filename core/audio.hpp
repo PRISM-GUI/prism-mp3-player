@@ -10,6 +10,7 @@ namespace player {
 struct PcmFormat {
   int sample_rate;
   int channels;  // always 2 out of the decoder
+  bool operator==(const PcmFormat&) const = default;
 };
 
 // A sink that pulls PCM from a ring on its own thread (A2DP on the board, audio::Output on the

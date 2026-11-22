@@ -45,6 +45,7 @@ public:
     if (!rates.contains(format.sample_rate)) return false;
     format_ = format;
     ring_ = &ring;
+    queued_at_start = ring.size();
     ++starts;
     return true;
   }
@@ -68,6 +69,7 @@ public:
   bool is_connected = true;
   float volume = -1;
   int starts = 0;
+  std::size_t queued_at_start = 0;
   std::vector<std::int16_t> left;
 
 private:
@@ -94,11 +96,12 @@ std::size_t loud_samples(const std::vector<std::int16_t>& s) {
   return static_cast<std::size_t>(std::ranges::count_if(s, [](auto v) { return std::abs(v) >= 100; }));
 }
 
-// Polls and pulls in 10 ms steps until the player stops or `max_steps` runs out.
-void run(Player& p, FakeOutput& out, int max_steps = 2000) {
+// Polls and pulls `frames` per step (10 ms by default) until the player stops or `max_steps`
+// runs out.
+void run(Player& p, FakeOutput& out, std::size_t frames = 441, int max_steps = 2000) {
   for (int i = 0; i < max_steps && p.status().state != State::Stopped; ++i) {
     p.poll();
-    out.pull(441);
+    out.pull(frames);
   }
 }
 
@@ -137,6 +140,7 @@ TEST_CASE("48 kHz plays; 32 kHz is refused with a message and the next track sta
   CHECK(p.status().state == State::Playing);
   CHECK(f.out.format().sample_rate == 48000);
 
+  f.out.rates.insert(32000);
   p.play({row("/32k.mp3"), row("/44k.mp3")}, 0);
   CHECK(p.status().state == State::Playing);
   CHECK(p.status().index == 1);
@@ -150,7 +154,7 @@ TEST_CASE("a corrupt file in a queue is skipped") {
   p.play({row("/junk.mp3"), row("/44k.mp3")}, 0);
   CHECK(p.status().state == State::Playing);
   CHECK(p.status().index == 1);
-  CHECK_FALSE(p.status().message.empty());
+  CHECK(p.status().message == "Cannot decode junk.mp3");
 }
 
 TEST_CASE("a track no longer on the card is skipped with a message") {
@@ -236,11 +240,80 @@ TEST_CASE("pause stops pulling and keeps the position") {
 TEST_CASE("underruns are counted when the ring runs dry") {
   Fixture f;
   Player p{f.storage, f.out};
-  p.play({row("/44k.mp3")}, 0);
+  p.play({row("/4s.mp3")}, 0);
   p.poll();
   CHECK(f.out.underruns() == 0);
   f.out.pull(100'000);
   CHECK(f.out.underruns() == 1);
+}
+
+TEST_CASE("the ring is filled before the output starts") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  p.play({row("/4s.mp3")}, 0);
+  CHECK(f.out.queued_at_start > 44100);
+}
+
+TEST_CASE("an album of same-rate tracks plays without an underrun or a restart") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  p.play({row("/44k.mp3"), row("/4s.mp3"), row("/44k.mp3")}, 0);
+  std::set<std::size_t> seen;
+  for (int i = 0; i < 2000 && p.status().state != State::Stopped; ++i) {
+    seen.insert(p.status().index);
+    p.poll();
+    f.out.pull(4096);
+  }
+  CHECK(p.status().state == State::Stopped);
+  CHECK(seen == std::set<std::size_t>{0, 1, 2});
+  CHECK(f.out.underruns() == 0);
+  CHECK(f.out.starts == 1);
+  CHECK(zero_crossings(f.out.left) == doctest::Approx(880 * 6).epsilon(0.01));
+}
+
+TEST_CASE("a change of sample rate between tracks drains without an underrun") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  p.play({row("/44k.mp3"), row("/48k.mp3")}, 0);
+  run(p, f.out, 4096);
+  CHECK(p.status().state == State::Stopped);
+  CHECK(f.out.starts == 2);
+  CHECK(f.out.underruns() == 0);
+}
+
+TEST_CASE("a track's position counts from its own start when tracks are chained") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  p.play({row("/44k.mp3"), row("/4s.mp3")}, 0);
+  for (int i = 0; i < 2000 && p.status().index == 0; ++i) {
+    p.poll();
+    f.out.pull(441);
+  }
+  CHECK(p.status().index == 1);
+  CHECK(p.status().position_s < 0.05);
+  CHECK(p.status().duration_s == doctest::Approx(4.0).epsilon(0.1));
+}
+
+TEST_CASE("a refusing output stops with its own message, without walking the queue") {
+  Fixture f;
+  f.out.rates.clear();
+  Player p{f.storage, f.out};
+  p.play({row("/44k.mp3"), row("/48k.mp3")}, 0);
+  CHECK(p.status().state == State::Stopped);
+  CHECK(p.status().index == 0);
+  CHECK(p.status().message == "Output refused 44100 Hz");
+}
+
+TEST_CASE("next with the output disconnected pauses on the next track") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  p.play({row("/44k.mp3"), row("/48k.mp3"), row("/44k.mp3")}, 0);
+  f.out.is_connected = false;
+  p.next();
+  CHECK(p.status().state == State::Paused);
+  CHECK(p.status().index == 1);
+  CHECK(p.status().message == "Headset disconnected");
+  CHECK_FALSE(f.out.started());
 }
 
 TEST_CASE("previous within 3 s goes back a track, after 3 s restarts") {
@@ -290,5 +363,20 @@ TEST_CASE("PcmRing: pop fills silence and counts an underrun when short") {
   CHECK(out[0] == 7);
   CHECK(out[3] == 10);
   CHECK(out[4] == 0);
+  CHECK(ring.underruns() == 1);
+}
+
+TEST_CASE("PcmRing: a short read after finish() is the end of the stream, not an underrun") {
+  PcmRing ring{8};
+  const std::int16_t in[] = {1, 2, 3};
+  ring.push(in);
+  ring.finish();
+  std::int16_t out[6];
+  ring.pop(out);
+  CHECK(out[2] == 3);
+  CHECK(out[3] == 0);
+  CHECK(ring.underruns() == 0);
+  ring.clear();
+  ring.pop(out);
   CHECK(ring.underruns() == 1);
 }
