@@ -175,7 +175,7 @@ void PlayerUi::draw_title(const Pen& pen) const {
 
 void PlayerUi::draw_menu(const Pen& pen) const {
   const auto& p = here();
-  if (p.screen == Screen::Music && !library_) return centred_note(pen, 110, "No music");
+  if (p.screen == Screen::Music && !library_) return centred_note(pen, 110, library_status_.empty() ? "No music" : library_status_);
   const auto rows = menu_rows(p.screen);
   const bool opens = p.screen != Screen::Settings;
   for (std::size_t i = p.top; i < std::min(rows.size(), p.top + kVisibleRows); ++i) {

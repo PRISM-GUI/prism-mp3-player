@@ -64,6 +64,8 @@ public:
   // A rebuilt library replaces the old one: its lists leave the stack (to Main when one is on
   // screen).
   void set_library(Library*);
+  // What the Music screen says while there is no library ("Updating library…"); empty: No music.
+  void set_library_status(std::string);
 
   void canvas(render::DrawList&, core::Rect, const ui::WidgetNode&);
   void view(app::ViewBuilder&);
@@ -99,6 +101,7 @@ private:
   Player& player_;
   int volume_ = kVolumeSteps / 2;
   std::vector<Place> stack_;
+  std::string library_status_;
   Player::Status shown_{};  // what the screen shows of the player, for tick()
 };
 

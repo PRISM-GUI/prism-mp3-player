@@ -265,6 +265,19 @@ TEST_CASE("no library: the Music screen says No music") {
   CHECK(ui.screen_title() == "Music");
 }
 
+TEST_CASE("while the library is built, the Music screen says so instead of No music") {
+  MemoryStorage s;
+  FakeOutput out;
+  Player player{s, out};
+  PlayerUi ui{nullptr, player};
+  ui.set_library_status("Updating library…");
+  press(ui, {Button::Select});
+  CHECK(shows(ui, "Updating library…"));
+  CHECK_FALSE(shows(ui, "No music"));
+  ui.set_library_status({});
+  CHECK(shows(ui, "No music"));
+}
+
 TEST_CASE("a new library leaves its lists for Main") {
   Six f;
   PlayerUi ui{f.library.get(), f.player};

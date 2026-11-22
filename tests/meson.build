@@ -19,3 +19,11 @@ test('wheel', executable('test_wheel', files('test_wheel.cpp'),
 test('ui', executable('test_ui', files('test_ui.cpp'),
   cpp_args : '-DTEST_DATA_DIR="@0@"'.format(meson.current_source_dir() / 'data'),
   dependencies : [player_core_dep, prism_raster_dep, doctest_dep]))
+
+# SDL's display-free drivers, as PRISM's own SDL tests run (its tests/meson.build).
+offscreen_env = environment({'SDL_VIDEODRIVER' : 'offscreen', 'SDL_AUDIO_DRIVER' : 'dummy'})
+
+test('desktop_smoke', executable('test_desktop_smoke', files('test_desktop_smoke.cpp'),
+  cpp_args : '-DTEST_DATA_DIR="@0@"'.format(meson.current_source_dir() / 'data'),
+  dependencies : [player_desktop_app_dep, doctest_dep]),
+  env : offscreen_env)

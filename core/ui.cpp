@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <utility>
 
 namespace player {
 namespace {
@@ -162,6 +163,11 @@ void PlayerUi::set_library(Library* library) {
   std::erase_if(stack_, [](const Place& p) { return p.screen == Screen::List; });
   for (auto& p : stack_)
     if (p.screen == Screen::Music) p = menu(Screen::Music);
+  changed();
+}
+
+void PlayerUi::set_library_status(std::string status) {
+  library_status_ = std::move(status);
   changed();
 }
 
