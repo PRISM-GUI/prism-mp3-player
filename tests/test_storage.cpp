@@ -79,6 +79,12 @@ void check_rename(Storage& s) {
   CHECK_FALSE(s.rename("/music/missing", "/music/b"));
 }
 
+void write_text(Storage& s, std::string_view path, std::string_view text) {
+  auto out = s.create(path);
+  REQUIRE(out);
+  *out << text;
+}
+
 void fill(MemoryStorage& s) {
   s.add("/music/a.mp3", bytes(5));
   s.add("/music/x/b.mp3", bytes(3));
@@ -150,4 +156,36 @@ TEST_CASE("rename replaces the target, on disk") {
   TempDir d;
   DirStorage s{d.path};
   check_rename(s);
+}
+
+TEST_CASE("DirStorage rename replaces an existing target") {
+  TempDir d;
+  DirStorage s{d.path};
+  write_text(s, "/a.bin", "aaa");
+  write_text(s, "/b.bin", "bbb");
+  CHECK(s.rename("/a.bin", "/b.bin"));
+  CHECK(s.open("/a.bin") == nullptr);
+  auto f = s.open("/b.bin");
+  REQUIRE(f);
+  CHECK(f->size() == 3);
+  std::vector<std::byte> out(8);
+  CHECK(f->read(0, out) == 3);
+  CHECK(out[0] == std::byte{'a'});
+  CHECK(out[1] == std::byte{'a'});
+  CHECK(out[2] == std::byte{'a'});
+}
+
+TEST_CASE("a reader opened before rename keeps reading the old bytes, on disk") {
+  TempDir d;
+  DirStorage s{d.path};
+  write_text(s, "/a.bin", "old");
+  write_text(s, "/b.bin", "new");
+  auto reader = s.open("/a.bin");
+  REQUIRE(reader);
+  CHECK(s.rename("/a.bin", "/b.bin"));
+  std::vector<std::byte> out(8);
+  CHECK(reader->read(0, out) == 3);
+  CHECK(out[0] == std::byte{'o'});
+  CHECK(out[1] == std::byte{'l'});
+  CHECK(out[2] == std::byte{'d'});
 }

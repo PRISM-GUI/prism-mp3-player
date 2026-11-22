@@ -76,8 +76,13 @@ std::unique_ptr<std::ostream> DirStorage::create(std::string_view path) {
 }
 
 bool DirStorage::rename(std::string_view from, std::string_view to) {
+  // simplify: FatFS refuses to rename onto an existing file, hence remove-then-rename. Not atomic:
+  // a failed rename leaves the target gone.
   std::error_code ec;
-  std::filesystem::rename(resolve(from), resolve(to), ec);
+  const auto target = resolve(to);
+  fs::remove(target, ec);
+  if (ec) return false;
+  std::filesystem::rename(resolve(from), target, ec);
   return !ec;
 }
 
