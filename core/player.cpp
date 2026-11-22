@@ -136,18 +136,27 @@ void Player::pause_disconnected() {
 }
 
 // Opens the track into decoder_ and decodes its first frame into first_frame_; returns why it
-// cannot play.
-std::string Player::open_track(std::size_t index) {
+// cannot play. With `at` in seconds, the track starts there rather than at its beginning.
+std::string Player::open_track(std::size_t index, double at) {
   const auto& path = queue_[index].path;
   auto file = storage_.open(path);
   if (!file) return std::format("Missing {}", path);
   const auto offset = audio_offset(*file);
+  const auto size = file->size();
   decoder_.emplace(std::move(file), offset);
   first_frame_ = decoder_->next_frame();
   if (first_frame_.empty()) return std::format("Cannot decode {}", file_name(path));
   const auto hz = decoder_->format().sample_rate;
   if (!supported_rate(hz)) return std::format("Unsupported sample rate {} Hz", hz);
   if (!output_.accepts(decoder_->format())) return std::format("Output cannot play {} Hz", hz);
+  if (at <= 0) return {};
+  // simplify: the byte is proportional to the time, which is exact only for a constant bitrate
+  // (VBR heads closer or further off the mark). Upgrade: the Xing header's 100-entry TOC.
+  const auto duration = decoder_->duration_s();
+  if (duration <= 0) return {};
+  decoder_->seek_to(offset + static_cast<std::uint64_t>(at / duration * static_cast<double>(size - offset)));
+  first_frame_ = decoder_->next_frame();
+  if (first_frame_.empty()) return std::format("Cannot decode {}", file_name(path));
   return {};
 }
 
@@ -212,6 +221,31 @@ std::uint64_t Player::played() const { return pushed_ - ring_.size(); }
 double Player::position_s() const {
   if (format_.sample_rate == 0 || played() < current_.start) return 0;
   return double(played() - current_.start) / 2 / format_.sample_rate;
+}
+
+// Moves the current track to `seconds`: the ring is flushed and refilled the way a track change
+// does it, so the audio that plays next comes from there. A paused player stays paused, with the
+// new position already in the ring.
+void Player::seek(double seconds) {
+  const std::lock_guard lock(mutex_);
+  if (state_ == State::Stopped) return;
+  const auto total = current_.duration_s;
+  if (total <= 0) return;
+  const auto target = std::max(0.0, seconds);
+  const auto index = current_.index;
+  const bool was_playing = state_ == State::Playing;
+  halt();
+  // At or past the end, or no frame left where the byte lands (an ID3v1 tag, say): the track is
+  // over, and the queue moves on as when a track plays to its end.
+  if (target >= total || !open_track(index, target).empty()) return start_at(index + 1);
+  format_ = decoder_->format();
+  current_ = {index, 0, total, {}};
+  message_.clear();
+  // Count the audio before the target as played, so position_s() reports it from now on.
+  pushed_ = static_cast<std::uint64_t>(target * 2 * format_.sample_rate);
+  push(first_frame_);
+  fill_ring();
+  if (was_playing) start_output();
 }
 
 }  // namespace player

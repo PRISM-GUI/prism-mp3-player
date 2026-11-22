@@ -262,12 +262,18 @@ void PlayerUi::draw_now_playing(const Pen& pen) const {
   const float bar_right = width - kBarMargin;
   const auto fraction = status.duration_s > 0 ? static_cast<float>(status.position_s / status.duration_s) : 0.f;
   progress_bar(dl, rect(kBarMargin, 168, bar_right - kBarMargin, 8), fraction, kHighlight);
+  // Scrub mode: a diamond where the play head will land, and no volume bar while the wheel seeks.
+  if (scrubbing_) {
+    const float head = kBarMargin + fraction * (bar_right - kBarMargin);
+    dl.filled_polygon({pt(head, 167), pt(head + 5, 172), pt(head, 177), pt(head - 5, 172)}, kHighlight);
+  }
   text(dl, clock(status.position_s), kBarMargin, 180, kSmallText, kInk);
   auto remaining = "-" + clock(status.duration_s - status.position_s);
   const float remaining_x = bar_right - pen.text_width(remaining, kSmallText);
   text(dl, std::move(remaining), remaining_x, 180, kSmallText, kInk);
-  progress_bar(dl, rect(kBarMargin, 222, bar_right - kBarMargin, 4), static_cast<float>(volume_) / kVolumeSteps,
-               kRule);
+  if (!scrubbing_)
+    progress_bar(dl, rect(kBarMargin, 222, bar_right - kBarMargin, 4), static_cast<float>(volume_) / kVolumeSteps,
+                 kRule);
 }
 
 namespace {

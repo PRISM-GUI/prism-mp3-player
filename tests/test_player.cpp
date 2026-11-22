@@ -8,6 +8,7 @@
 #include <doctest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -592,4 +593,64 @@ TEST_CASE("current_track and queue_size follow play and next") {
   CHECK(p.current_track()->path == "/44k.mp3");
   CHECK(p.status().index == 2);
   CHECK(p.current_track()->title == "t");
+}
+
+// Seeking is a byte ratio (exact for a CBR file). The fixture's 4 s file repeats the same second
+// of sine, so the audio itself cannot tell a seek apart from a no-op: the position, and the shorter
+// run to the end of the track, are what do.
+TEST_CASE("seek moves the position and the next audio comes from there") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  p.play({row("/4s.mp3")}, 0);
+  const auto total = p.status().duration_s;
+  REQUIRE(total > 3.5);
+  p.seek(2.0);
+  CHECK(std::abs(p.status().position_s - 2.0) < 0.1);
+  f.out.pull(1000);  // 1000 frames: about 23 ms of audio
+  CHECK(p.status().position_s > 2.0);
+  CHECK(p.status().position_s < 2.2);
+  p.seek(total - 0.25);  // a quarter of a second left to play
+  f.out.pull(22'050);    // half a second of audio, so the track runs out
+  p.poll();
+  CHECK(p.status().state == State::Stopped);
+}
+
+// A seek at or past the end leaves the track over, exactly as playing to its end does: the next
+// poll moves the queue on. Seeking before 0 is a seek to the start.
+TEST_CASE("a seek at or past the end ends the track; before 0 it goes to the start") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  p.play({row("/44k.mp3"), row("/48k.mp3")}, 0);
+  REQUIRE(p.status().index == 0);
+  p.seek(100.0);
+  p.poll();
+  CHECK(p.status().index == 1);
+  CHECK(p.status().state == State::Playing);
+  CHECK(p.status().position_s < 0.5);
+
+  p.seek(-5.0);
+  CHECK(p.status().position_s < 0.1);
+  CHECK(p.status().state == State::Playing);
+  CHECK(p.status().index == 1);
+}
+
+TEST_CASE("seek while paused stays paused") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  p.play({row("/4s.mp3")}, 0);
+  p.toggle_pause();
+  REQUIRE(p.status().state == State::Paused);
+  p.seek(1.5);
+  CHECK(p.status().state == State::Paused);
+  CHECK(std::abs(p.status().position_s - 1.5) < 0.1);
+}
+
+TEST_CASE("seek when stopped does nothing") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  p.seek(5.0);
+  CHECK(p.status().state == State::Stopped);
+  CHECK(p.status().position_s == 0.0);
+  CHECK(p.queue_size() == 0U);
+  CHECK(f.out.starts == 0);
 }

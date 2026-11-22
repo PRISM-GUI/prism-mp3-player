@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <utility>
 
 namespace player {
@@ -101,6 +102,7 @@ void PlayerUi::fit_rows(float height) {
 }
 
 PlayerUi::PlayerUi(Library* library, Player& player) : library_(library), player_(player) {
+  clock_ = [] { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
   stack_.push_back(menu(Screen::Main));
   player_.set_volume(static_cast<float>(volume_) / kVolumeSteps);
 }
@@ -143,6 +145,11 @@ void PlayerUi::handle(WheelEvent e) {
   } else {
     switch (std::get<Button>(e)) {
       case Button::Menu:
+        // Menu leaves the scrubber first; the screen only on a second press.
+        if (scrubbing_) {
+          scrubbing_ = false;
+          break;
+        }
         if (stack_.size() > 1) stack_.pop_back();
         break;
       case Button::PlayPause: player_.toggle_pause(); break;
@@ -156,11 +163,23 @@ void PlayerUi::handle(WheelEvent e) {
 
 void PlayerUi::rotate(int steps) {
   if (here().screen != Screen::NowPlaying) return move_selection(here(), steps, rows_on_screen_);
+  if (scrubbing_) {
+    scrub_step_at_ = clock_();
+    player_.seek(player_.status().position_s + steps * kScrubStep);
+    return;
+  }
   volume_ = std::clamp(volume_ + steps, 0, kVolumeSteps);
   player_.set_volume(static_cast<float>(volume_) / kVolumeSteps);
 }
 
 void PlayerUi::select() {
+  // Select in Now Playing starts and stops scrubbing; the wheel seeks while it lasts.
+  if (here().screen == Screen::NowPlaying) {
+    if (player_.status().state == Player::Status::State::Stopped) return;
+    scrubbing_ = !scrubbing_;
+    scrub_step_at_ = clock_();
+    return;
+  }
   if (here().count == 0) return;
   if (here().screen == Screen::List) return select_list_row();
   if (here().screen == Screen::Folders) return select_folder_row();
@@ -296,6 +315,11 @@ void PlayerUi::play_folder(std::string_view dir, std::size_t row) {
 void PlayerUi::tick() {
   if (polls_on_tick_) player_.poll();
   watch_cover();
+  // Scrub mode lapses on its own: the next wheel step is the volume again.
+  if (scrubbing_ && clock_() - scrub_step_at_ > kScrubIdle) {
+    scrubbing_ = false;
+    changed();  // the marker goes, even on a paused player whose clock does not repaint
+  }
   const auto now = player_.status();
   const bool clock_moved = here().screen == Screen::NowPlaying &&
                            static_cast<long>(now.position_s) != static_cast<long>(shown_.position_s);

@@ -86,4 +86,12 @@ double Mp3Decoder::duration_s() const {
   return static_cast<double>(file_->size() - audio_offset_) * 8.0 / (bitrate_kbps_ * 1000.0);
 }
 
+// Drops what the buffer still holds and reads on from `byte`: minimp3 resyncs on the next frame
+// header it finds there, so a byte in the middle of a frame costs one frame at most.
+void Mp3Decoder::seek_to(std::uint64_t byte) {
+  file_pos_ = std::clamp(byte, audio_offset_, file_->size());
+  pos_ = end_ = 0;
+  mp3dec_init(&dec_);
+}
+
 }  // namespace player

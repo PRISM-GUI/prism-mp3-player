@@ -23,6 +23,9 @@ public:
   PcmFormat format() const { return {sample_rate_, 2}; }
   // From a Xing or VBRI header's frame count, else from the first frame's bitrate.
   double duration_s() const;
+  // Drops the buffered bytes and reads on from `byte` (clamped to the audio): minimp3 resyncs on the
+  // next frame header it finds. Stub until the implementation lands.
+  void seek_to(std::uint64_t byte);
 
 private:
   static constexpr std::size_t kChunk = 16 * 1024;

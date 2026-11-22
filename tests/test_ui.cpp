@@ -824,3 +824,86 @@ TEST_CASE("Now Playing draws the track's cover once loaded, the placeholder befo
   CHECK_FALSE(draws_placeholder(after));
   CHECK(draws_image(after));
 }
+
+namespace {
+
+// The scrubber's diamond: a filled polygon in the highlight colour, on the progress bar (y 168..176),
+// never the bar's own rectangle.
+bool marker_on_bar(const prism::render::DrawList& dl) {
+  return std::ranges::any_of(dl.commands, [](const auto& cmd) {
+    const auto* poly = std::get_if<prism::render::FilledPolygon>(&cmd);
+    if (!poly || poly->color != PlayerUi::kHighlight) return false;
+    return std::ranges::all_of(poly->points,
+                               [](const Point& p) { return p.y.raw() > 156.f && p.y.raw() < 188.f; });
+  });
+}
+
+// A playing 4 s track on Now Playing, reached without a library: Main row 1 is Now Playing.
+struct Scrubber {
+  MemoryStorage memory;
+  FakeOutput out;
+  Player player{memory, out};
+  PlayerUi ui{nullptr, player};
+
+  Scrubber() {
+    const auto one_second = load("sine440_44k.mp3");
+    Bytes audio;
+    for (int i = 0; i < 20; ++i) append(audio, one_second);  // 20 s: a 5 s step lands mid-track
+    memory.add("/music/a.mp3", std::move(audio), 1000);
+    player.play({{"/music/a.mp3", "A", "", "", 1}}, 0);
+    press(ui, {Rotate{1}, Button::Select});
+  }
+
+  double position() const { return player.status().position_s; }
+};
+
+}  // namespace
+
+TEST_CASE("Select in Now Playing enters scrub mode: the wheel seeks 5 s a step instead of the volume") {
+  Scrubber s;
+  REQUIRE(s.player.status().state == Player::Status::State::Playing);
+  const auto volume = s.out.volume;
+  press(s.ui, {Button::Select});  // scrub mode on
+  press(s.ui, {Rotate{1}});       // one step forward: 5 s into a 20 s track
+  CHECK(s.position() > PlayerUi::kScrubStep - 0.5);
+  CHECK(s.position() < PlayerUi::kScrubStep + 0.5);
+  CHECK(s.out.volume == volume);  // and the wheel did not touch the volume
+  press(s.ui, {Rotate{-1}});      // one step back, to the start
+  CHECK(s.position() < 0.5);
+}
+
+TEST_CASE("Menu leaves scrub mode and stays in Now Playing") {
+  Scrubber s;
+  const auto volume = s.out.volume;
+  press(s.ui, {Button::Select});  // scrub mode on
+  press(s.ui, {Rotate{1}});       // seeks
+  CHECK(s.position() > PlayerUi::kScrubStep - 0.5);
+  press(s.ui, {Button::Menu});  // leaves scrub mode, not the screen
+  CHECK(s.ui.screen_title() == "Now Playing");
+  press(s.ui, {Rotate{1}});  // the wheel is the volume again
+  CHECK(s.out.volume != volume);
+  press(s.ui, {Button::Menu});  // a second Menu goes back as it always did
+  CHECK(s.ui.screen_title() == "Player");
+}
+
+TEST_CASE("scrub mode ends by itself after 3 s without a step") {
+  Scrubber s;
+  double now = 100.0;
+  s.ui.set_clock([&now] { return now; });
+  press(s.ui, {Button::Select});  // scrub mode on
+  press(s.ui, {Rotate{1}});       // one step, which also stamps the clock
+  CHECK(s.position() > PlayerUi::kScrubStep - 0.5);
+  now += PlayerUi::kScrubIdle + 1.0;
+  s.ui.tick();  // notices the idle time and leaves scrub mode
+  const auto volume = s.out.volume;
+  press(s.ui, {Rotate{1}});
+  CHECK(s.out.volume != volume);  // the wheel is the volume again
+}
+
+TEST_CASE("scrub mode draws the marker on the progress bar") {
+  Scrubber s;
+  CHECK_FALSE(marker_on_bar(drawn(s.ui)));
+  press(s.ui, {Button::Select});  // scrub mode on
+  press(s.ui, {Rotate{1}});       // far enough along the bar to see
+  CHECK(marker_on_bar(drawn(s.ui)));
+}
