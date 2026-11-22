@@ -59,8 +59,12 @@ public:
   PlayerUi(Library*, Player&);  // library may be null ("No music")
 
   void handle(WheelEvent);
-  // Polls the player and repaints when what the screen shows changed (Now Playing's clock).
+  // Polls the player (unless the board polls on a thread of its own) and repaints when what the
+  // screen shows changed (Now Playing's clock).
   void tick();
+  // A board that runs poll() on its own thread turns this off, or two decoders fight over the
+  // ring. On by default: the desktop has no other thread to poll from.
+  void poll_on_tick(bool on) { polls_on_tick_ = on; }
   // A rebuilt library replaces the old one: its lists leave the stack (to Main when one is on
   // screen).
   void set_library(Library*);
@@ -104,6 +108,7 @@ private:
   Library* library_;
   Player& player_;
   int volume_ = kVolumeSteps / 2;
+  bool polls_on_tick_ = true;
   std::vector<Place> stack_;
   std::string library_status_;
   Player::Status shown_{};  // what the screen shows of the player, for tick()

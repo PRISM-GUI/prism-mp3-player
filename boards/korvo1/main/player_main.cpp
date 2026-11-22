@@ -1,10 +1,11 @@
 // The player on the Korvo-1's 800x480 panel: the 320x240 screen beside a touch click wheel, as
 // on the desktop. The MP3s come from the card in /sdcard/music, indexed on a thread of its own;
-// the sound goes nowhere yet (Bluetooth comes later). The board's MODE button is Menu, VOL+ and
-// VOL- turn the wheel.
+// the sound goes to a Bluetooth headset (bt_output.cpp), decoded on a third thread. The board's
+// MODE button is Menu, VOL+ and VOL- turn the wheel.
 
 #include "app_support.hpp"
 #include "band_display.hpp"
+#include "bt_output.hpp"
 #include "buttons.hpp"
 #include "touch.hpp"
 
@@ -17,10 +18,12 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_pthread.h"
+#include "esp_timer.h"
 
 #include <prism/platform/frame_app.hpp>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -40,17 +43,9 @@ constexpr std::string_view kCannotWrite = "Cannot write the library index";
 constexpr std::string_view kCannotOpen = "Cannot open the library index";
 constexpr std::string_view kNoCard = "No SD card";
 constexpr std::uint32_t kBuilderStack = 32768;
-
-// No headset yet (Bluetooth comes later): accepts no format, so the player plays nothing.
-class NullOutput final : public player::PcmOutput {
-public:
-  bool accepts(player::PcmFormat) const override { return false; }
-  bool start(player::PcmFormat, player::PcmRing&) override { return false; }
-  void stop() override {}
-  bool connected() const override { return false; }
-  std::uint32_t underruns() const override { return 0; }
-  void set_volume(float) override {}
-};
+constexpr std::uint32_t kPollStack = 32768;
+constexpr std::chrono::milliseconds kPollEvery{5};
+constexpr std::int64_t kStatusEveryUs = 5'000'000;
 
 // What the builder thread found of the card: the index it was given is current, a new one waits
 // at .prism-library.new, or none could be written.
@@ -168,7 +163,7 @@ private:
 
 struct PlayerModel {
   player::DirStorage storage{BSP_SD_MOUNT_POINT};
-  NullOutput output;
+  player::BtOutput& output = player::BtOutput::open();
   player::Player player{storage, output};
   std::shared_ptr<player::Library> library;
   player::PlayerUi ui{nullptr, player};
@@ -220,6 +215,81 @@ bool mount_card() {
   return false;
 }
 
+// The headset's buttons arrive on the Bluetooth task: they wait here until the logic loop hands
+// them to the UI, as if the wheel had sent them.
+class RemoteButtons {
+public:
+  void post(player::Button button) {
+    const std::lock_guard lock(mutex_);
+    queue_.push_back(button);
+  }
+
+  void drain(player::PlayerUi& ui) {
+    std::vector<player::Button> ready;
+    {
+      const std::lock_guard lock(mutex_);
+      ready.swap(queue_);
+    }
+    for (const auto button : ready) ui.handle(button);
+  }
+
+private:
+  std::mutex mutex_;
+  std::vector<player::Button> queue_;  // guarded by mutex_: written on the Bluetooth task
+};
+
+// poll() decodes a few frames and refills the ring: it runs here, on the logic core, with its
+// stack in PSRAM, so nothing the user does waits for a decode. The board never shuts down, so this
+// loop ends with it and is never joined.
+std::thread start_poll_thread(player::Player& player) {
+  esp_pthread_cfg_t previous{};
+  if (esp_pthread_get_cfg(&previous) != ESP_OK) previous = esp_pthread_get_default_config();
+  esp_pthread_cfg_t cfg = previous;
+  cfg.stack_size = kPollStack;
+  cfg.pin_to_core = 0;
+  cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+  esp_pthread_set_cfg(&cfg);
+  std::thread thread{[&player] {
+    for (;;) {
+      player.poll();
+      std::this_thread::sleep_for(kPollEvery);
+    }
+  }};
+  esp_pthread_set_cfg(&previous);  // the config is the creating thread's own
+  return thread;
+}
+
+const char* state_name(player::Player::Status::State state) {
+  switch (state) {
+    case player::Player::Status::State::Stopped: return "stopped";
+    case player::Player::Status::State::Playing: return "playing";
+    case player::Player::Status::State::Paused: return "paused";
+  }
+  return "unknown";
+}
+
+// One line every 5 s, next to the heap's own: what the player and the headset are doing.
+void print_status_line(const PlayerModel& model) {
+  static std::int64_t last_us = 0;
+  const std::int64_t now = esp_timer_get_time();
+  if (last_us != 0 && now - last_us < kStatusEveryUs) return;
+  last_us = now;
+  std::printf("player: %s bt %s underruns %lu internal free %zu largest %zu\n",
+              state_name(model.player.status().state), model.output.state_text().c_str(),
+              static_cast<unsigned long>(model.output.underruns()),
+              heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+              heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+}
+
+// Settings → Bluetooth shows what the radio is doing; the string is replaced only when it changes,
+// so the canvas is not repainted every frame.
+void show_bluetooth(player::PlayerUi& ui, const player::BtOutput& radio) {
+  auto text = radio.state_text();
+  if (text == ui.settings.bluetooth) return;
+  ui.settings.bluetooth = std::move(text);
+  ui.revision.set(ui.revision.get() + 1);
+}
+
 }  // namespace
 
 extern "C" void app_main() {
@@ -229,14 +299,21 @@ extern "C" void app_main() {
   const bool card = mount_card();
 
   static PlayerModel model;
+  static RemoteButtons remote;
   if (!card) model.ui.set_library_status(std::string{kNoCard});
+  model.ui.poll_on_tick(false);  // the poll thread does that now
+  model.output.on_remote([](player::Button button) { remote.post(button); });
   static auto buttons = open_buttons();
+  static auto polling = start_poll_thread(model.player);
   prism::platform::frame_app(*display, input, model, [card](prism::platform::FrameContext& ctx) {
+    ctx.on_loop([] { remote.drain(model.ui); });
     ctx.on_loop([] { handle_presses(buttons, model.ui); });
     ctx.on_loop([card] {
       if (card) model.loader.pump(model.ui, model.library);
     });
     ctx.on_loop([] { model.ui.tick(); });
+    ctx.on_loop([] { show_bluetooth(model.ui, model.output); });
+    ctx.on_loop([] { print_status_line(model); });
     ctx.on_stats(korvo1::print_stats);
   }, korvo1::pinned_threads());
   korvo1::halt_runtime_stopped();

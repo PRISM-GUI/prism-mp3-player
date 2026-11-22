@@ -1,0 +1,10 @@
+menu "Player"
+
+config PLAYER_BT_NAME
+    string "Headset to connect to at boot (its Bluetooth name, or part of it)"
+    default "WH-1000XM3"
+    help
+        The player connects to a bonded headset first; with none bonded it scans for the first
+        device whose name contains this string.
+
+endmenu

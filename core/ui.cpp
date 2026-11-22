@@ -149,7 +149,7 @@ void PlayerUi::play_from(std::size_t row) {
 }
 
 void PlayerUi::tick() {
-  player_.poll();
+  if (polls_on_tick_) player_.poll();
   const auto now = player_.status();
   const bool clock_moved = here().screen == Screen::NowPlaying &&
                            static_cast<long>(now.position_s) != static_cast<long>(shown_.position_s);
