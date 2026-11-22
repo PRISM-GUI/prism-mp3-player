@@ -21,6 +21,10 @@ struct Tags {
 };
 
 // Never throws. Strings are valid UTF-8. A missing title is the file name without its extension.
+// Reads the frame headers, the title, artist, album and track frames, and an APIC frame up to
+// its picture, never the picture itself.
 Tags read_tags(File& file, std::string_view file_name);
+// Tags::audio_offset from the tag header alone (10 bytes read). Never throws.
+std::uint64_t audio_offset(File& file);
 
 }  // namespace player

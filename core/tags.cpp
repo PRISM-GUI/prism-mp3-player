@@ -3,6 +3,7 @@
 #include "prism/core/utf8.hpp"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <optional>
 #include <span>
@@ -14,9 +15,13 @@ namespace {
 using Bytes = std::span<const std::byte>;
 
 constexpr std::size_t kHeaderSize = 10;
-constexpr std::uint64_t kMaxTagRead = 1 << 20;
 constexpr std::size_t kV1Size = 128;
 constexpr std::size_t kMaxFieldBytes = 256;
+constexpr std::size_t kMaxTextRead = 4 * kMaxFieldBytes;  // kMaxFieldBytes of UTF-8 from any encoding
+constexpr std::size_t kMaxApicHead = 1024;  // encoding, mime type, picture type and description
+// A hostile tag of empty frames would otherwise cost millions of reads.
+constexpr int kMaxFrames = 512;
+constexpr std::array<std::string_view, 4> kTextIds{"TIT2", "TPE1", "TALB", "TRCK"};
 
 unsigned u8(std::byte b) { return std::to_integer<unsigned>(b); }
 
@@ -62,7 +67,9 @@ std::string utf8_or_latin1(Bytes b) {
   const auto* p = reinterpret_cast<const char*>(b.data());
   const std::string_view raw{p, b.size()};
   const auto text = raw.substr(0, raw.find('\0'));
-  return prism::core::utf8::sanitize(text) == text ? std::string{text} : latin1_to_utf8(b);
+  // Only the part kept is checked: a text read short may end in the middle of a code point.
+  const auto kept = text.substr(0, prism::core::utf8::snap(text, kMaxFieldBytes));
+  return prism::core::utf8::sanitize(kept) == kept ? std::string{kept} : latin1_to_utf8(b);
 }
 
 std::string utf16_to_utf8(Bytes b, bool big_endian) {
@@ -93,13 +100,18 @@ std::string utf16_with_bom_to_utf8(Bytes b) {
   return utf16_to_utf8(has_bom ? b.subspan(2) : b, big_endian);
 }
 
+Bytes without_big_endian_bom(Bytes b) {
+  const bool bom = b.size() >= 2 && u8(b[0]) == 0xfe && u8(b[1]) == 0xff;
+  return bom ? b.subspan(2) : b;
+}
+
 bool is_wide(unsigned encoding) { return encoding == 1 || encoding == 2; }
 
 std::optional<std::string> decode_text(unsigned encoding, Bytes b) {
   switch (encoding) {
     case 0: return latin1_to_utf8(b);
     case 1: return utf16_with_bom_to_utf8(b);
-    case 2: return utf16_to_utf8(b, true);
+    case 2: return utf16_to_utf8(without_big_endian_bom(b), true);
     case 3: return utf8_or_latin1(b);
     default: return std::nullopt;
   }
@@ -120,35 +132,31 @@ std::optional<std::string> text_frame_value(Bytes body) {
   return decode_text(u8(body[0]), body.subspan(1)).transform(up_to_nul).transform(capped);
 }
 
-int leading_number(const std::string& s) {
+int leading_number(std::string_view s) {
+  s.remove_prefix(std::min(s.find_first_not_of(' '), s.size()));
   int n = 0;
   std::from_chars(s.data(), s.data() + s.size(), n);
   return std::max(n, 0);
 }
 
-std::size_t terminator_end(Bytes b, std::size_t from, bool wide) {
+// Where the NUL ending a string from `from` ends; none when there is no NUL.
+std::optional<std::size_t> terminator_end(Bytes b, std::size_t from, bool wide) {
   const std::size_t step = wide ? 2 : 1;
   for (std::size_t i = from; i + step <= b.size(); i += step)
     if (u8(b[i]) == 0 && (!wide || u8(b[i + 1]) == 0)) return i + step;
-  return b.size();
+  return std::nullopt;
 }
 
-std::optional<Cover> apic_cover(Bytes body, std::uint64_t body_offset) {
-  if (body.empty()) return std::nullopt;
-  const auto mime_end = terminator_end(body, 1, false);
-  if (mime_end >= body.size()) return std::nullopt;
-  const auto description_start = mime_end + 1;
-  const auto data_start = terminator_end(body, description_start, is_wide(u8(body[0])));
-  if (data_start >= body.size()) return std::nullopt;
-  return Cover{body_offset + data_start, static_cast<std::uint32_t>(body.size() - data_start),
-               latin1_to_utf8(body.subspan(1, mime_end - 2))};
+// `head`: the first bytes of an APIC body of `body_size` bytes at `body_offset` in the file.
+std::optional<Cover> apic_cover(Bytes head, std::uint64_t body_size, std::uint64_t body_offset) {
+  if (head.empty()) return std::nullopt;
+  const auto mime_end = terminator_end(head, 1, false);
+  if (!mime_end || *mime_end >= head.size()) return std::nullopt;
+  const auto data_start = terminator_end(head, *mime_end + 1, is_wide(u8(head[0])));
+  if (!data_start || *data_start >= body_size) return std::nullopt;
+  return Cover{body_offset + *data_start, static_cast<std::uint32_t>(body_size - *data_start),
+               latin1_to_utf8(head.subspan(1, *mime_end - 2))};
 }
-
-struct Frame {
-  std::string id;
-  Bytes body;
-  std::uint64_t offset;  // of the body, in the tag buffer
-};
 
 struct FrameFlags {
   bool unusable;  // compressed, encrypted or unsynchronised: not read
@@ -168,57 +176,93 @@ bool is_frame_id(Bytes id) {
   });
 }
 
-bool frame_boundary(Bytes tag, std::size_t pos) {
-  return pos + kHeaderSize > tag.size() || u8(tag[pos]) == 0 || is_frame_id(tag.subspan(pos, 4));
+// The frames of a v2.3 or v2.4 tag, in the file up to `end`; read one header at a time.
+struct FrameArea {
+  File& file;
+  int version;
+  std::uint64_t end;
+};
+
+std::optional<std::vector<std::byte>> read_in(const FrameArea& a, std::uint64_t at, std::uint64_t n) {
+  return at <= a.end && n <= a.end - at ? read_exact(a.file, at, n) : std::nullopt;
+}
+
+bool frame_boundary(const FrameArea& a, std::uint64_t pos) {
+  if (kHeaderSize > a.end - pos) return true;
+  const auto id = read_exact(a.file, pos, 4);
+  return !id || u8((*id)[0]) == 0 || is_frame_id(*id);
 }
 
 // Old iTunes wrote plain sizes in v2.4 tags: the synchsafe reading is kept only when it lands on a frame.
-std::optional<std::uint32_t> frame_size(int version, Bytes tag, std::size_t pos) {
-  const auto size_bytes = tag.subspan(pos + 4, 4);
+std::optional<std::uint32_t> frame_size(const FrameArea& a, Bytes header, std::uint64_t pos) {
+  const auto size_bytes = header.subspan(4, 4);
   const auto body_start = pos + kHeaderSize;
-  const auto fits = [&](std::uint32_t s) { return s <= tag.size() - body_start; };
-  const auto synchsafe_size = version == 4 ? synchsafe(size_bytes) : std::nullopt;
-  if (synchsafe_size && fits(*synchsafe_size) && frame_boundary(tag, body_start + *synchsafe_size))
+  const auto fits = [&](std::uint32_t s) { return s <= a.end - body_start; };
+  const auto synchsafe_size = a.version == 4 ? synchsafe(size_bytes) : std::nullopt;
+  if (synchsafe_size && fits(*synchsafe_size) && frame_boundary(a, body_start + *synchsafe_size))
     return synchsafe_size;
   const auto plain = be32(size_bytes);
   return fits(plain) ? std::optional{plain} : std::nullopt;
 }
 
-std::size_t extended_header_size(int version, Bytes tag) {
-  if (tag.size() < 4) return tag.size();
-  const auto declared = version == 4 ? synchsafe(tag).value_or(tag.size()) : std::uint64_t{be32(tag)} + 4;
-  return static_cast<std::size_t>(std::min<std::uint64_t>(declared, tag.size()));
+struct FrameHeader {
+  std::string id;
+  std::uint64_t body;  // in the file, past a data length indicator
+  std::uint32_t size;  // of the body from there
+  bool unusable;
+  std::uint64_t next;  // the next frame's header
+};
+
+std::optional<FrameHeader> frame_at(const FrameArea& a, std::uint64_t pos) {
+  const auto h = read_in(a, pos, kHeaderSize);
+  if (!h || u8((*h)[0]) == 0) return std::nullopt;
+  const Bytes header{*h};
+  const auto size = frame_size(a, header, pos);
+  if (!size) return std::nullopt;
+  const auto flags = frame_flags(a.version, header.subspan(8, 2));
+  const auto skip = flags.has_data_length ? std::min<std::uint32_t>(4, *size) : 0;
+  const auto body_start = pos + kHeaderSize;
+  return FrameHeader{latin1_to_utf8(header.first(4)), body_start + skip, *size - skip, flags.unusable,
+                     body_start + *size};
 }
 
-std::vector<Frame> split_frames(int version, Bytes tag, std::size_t start) {
-  std::vector<Frame> frames;
-  for (auto pos = start; pos + kHeaderSize <= tag.size() && u8(tag[pos]) != 0;) {
-    const auto size = frame_size(version, tag, pos);
-    const auto body_start = pos + kHeaderSize;
-    if (!size) break;
-    const auto flags = frame_flags(version, tag.subspan(pos + 8, 2));
-    const auto skip = flags.has_data_length ? std::min<std::size_t>(4, *size) : 0;
-    const auto id = latin1_to_utf8(tag.subspan(pos, 4));
-    if (!flags.unusable) frames.push_back({id, tag.subspan(body_start + skip, *size - skip), body_start + skip});
-    pos = body_start + *size;
-  }
-  return frames;
+std::uint64_t frames_start(const FrameArea& a, int version, bool extended_header) {
+  if (!extended_header) return kHeaderSize;
+  const auto size = read_in(a, kHeaderSize, 4);
+  if (!size) return a.end;
+  const auto declared = version == 4 ? synchsafe(*size).value_or(a.end) : std::uint64_t{be32(*size)} + 4;
+  return kHeaderSize + std::min<std::uint64_t>(declared, a.end - kHeaderSize);
 }
 
-void apply_text(Tags& t, const Frame& f) {
-  const auto text = text_frame_value(f.body);
+void apply_text(Tags& t, std::string_view id, Bytes body) {
+  const auto text = text_frame_value(body);
   if (!text) return;
-  if (f.id == "TIT2") t.title = *text;
-  else if (f.id == "TPE1") t.artist = *text;
-  else if (f.id == "TALB") t.album = *text;
-  else if (f.id == "TRCK") t.track = leading_number(*text);
+  if (id == "TIT2") t.title = *text;
+  else if (id == "TPE1") t.artist = *text;
+  else if (id == "TALB") t.album = *text;
+  else if (id == "TRCK") t.track = leading_number(*text);
 }
 
-void apply_frame(Tags& t, const Frame& f, std::uint64_t tag_file_offset) {
-  if (f.id == "APIC" && t.cover.size == 0)
-    t.cover = apic_cover(f.body, tag_file_offset + f.offset).value_or(Cover{});
-  else
-    apply_text(t, f);
+void read_text(Tags& t, const FrameArea& a, const FrameHeader& f) {
+  if (const auto body = read_exact(a.file, f.body, std::min<std::uint64_t>(f.size, kMaxTextRead)))
+    apply_text(t, f.id, *body);
+}
+
+// Reads the APIC header part only: the picture is located, never read.
+void read_cover(Tags& t, const FrameArea& a, const FrameHeader& f) {
+  if (const auto head = read_exact(a.file, f.body, std::min<std::uint64_t>(f.size, kMaxApicHead)))
+    t.cover = apic_cover(*head, f.size, f.body).value_or(Cover{});
+}
+
+void read_frame(Tags& t, const FrameArea& a, const FrameHeader& f) {
+  if (f.unusable) return;
+  if (f.id == "APIC" && t.cover.size == 0) read_cover(t, a, f);
+  else if (std::ranges::contains(kTextIds, f.id)) read_text(t, a, f);
+}
+
+void read_frames(Tags& t, const FrameArea& a, std::uint64_t start) {
+  auto f = frame_at(a, start);
+  for (int n = 0; f && n < kMaxFrames; ++n, f = frame_at(a, f->next)) read_frame(t, a, *f);
 }
 
 struct V2Header {
@@ -252,10 +296,8 @@ Tags tags_from_v2(File& f, const V2Header& h) {
   // simplify: a tag-wide unsynchronisation flag means no frames are read; undo it when real files need it.
   if (h.flags & 0x80) return t;
   if (h.size > f.size() - kHeaderSize) return t;
-  const auto tag = read_exact(f, kHeaderSize, std::min<std::uint64_t>(h.size, kMaxTagRead));
-  if (!tag) return t;
-  const auto start = (h.flags & 0x40) ? extended_header_size(h.version, *tag) : 0;
-  for (const auto& frame : split_frames(h.version, *tag, start)) apply_frame(t, frame, kHeaderSize);
+  const FrameArea area{f, h.version, kHeaderSize + h.size};
+  read_frames(t, area, frames_start(area, h.version, (h.flags & 0x40) != 0));
   return t;
 }
 
@@ -308,6 +350,15 @@ Tags parse(File& f) {
 }
 
 }  // namespace
+
+std::uint64_t audio_offset(File& file) {
+  try {
+    const auto header = any_v2_header(file);
+    return header ? v2_audio_offset(file, *header) : 0;
+  } catch (...) {
+    return 0;
+  }
+}
 
 Tags read_tags(File& file, std::string_view file_name) {
   Tags tags;

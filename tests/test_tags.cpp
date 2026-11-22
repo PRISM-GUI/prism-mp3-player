@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "core/memory_storage.hpp"
 #include "core/tags.hpp"
+#include "tests/counting_storage.hpp"
 #include "tests/tag_builder.hpp"
 
 #include <doctest.h>
@@ -180,4 +181,42 @@ TEST_CASE("an ID3v2.4 tag with plain (not synchsafe) frame sizes, as old iTunes 
   const auto t = tags_of(concat({tag, fake_audio(10)}));
   CHECK(t.title == std::string(256, 'x'));
   CHECK(t.album == "Album");
+}
+
+TEST_CASE("a 500 KB cover is located without reading it") {
+  Bytes picture(500 * 1024, std::byte{0x5a});
+  picture.front() = std::byte{0xff};
+  picture.back() = std::byte{0xd9};
+  const auto title = frame(3, "TIT2", latin1_text("Title"));
+  const auto apic = frame(3, "APIC", apic_payload("image/jpeg", picture));
+  const auto tag = id3v2(3, {title, apic, frame(3, "TALB", latin1_text("After the cover"))});
+  MemoryStorage storage;
+  storage.add("/a.mp3", concat({tag, fake_audio(100)}));
+  std::size_t bytes = 0;
+  CountingFile f{storage.open("/a.mp3"), bytes};
+  const auto t = read_tags(f, "a.mp3");
+  CHECK(bytes < 8 * 1024);
+  CHECK(t.title == "Title");
+  CHECK(t.album == "After the cover");
+  CHECK(t.cover.mime == "image/jpeg");
+  CHECK(t.cover.size == picture.size());
+  // encoding, "image/jpeg" and its NUL, picture type, empty description's NUL
+  const auto picture_start = 10 + title.size() + 10 + 1 + 11 + 1 + 1;
+  CHECK(t.cover.offset == picture_start);
+  Bytes ends(1);
+  f.read(t.cover.offset, ends);
+  CHECK(ends[0] == std::byte{0xff});
+  f.read(t.cover.offset + t.cover.size - 1, ends);
+  CHECK(ends[0] == std::byte{0xd9});
+}
+
+TEST_CASE("UTF-16BE text (encoding 2) drops a leading byte order mark") {
+  const Bytes hi{std::byte{0xfe}, std::byte{0xff}, std::byte{0}, std::byte{'H'}, std::byte{0}, std::byte{'i'}};
+  const auto tag = id3v2(4, {frame(4, "TIT2", text_payload(2, hi))});
+  CHECK(tags_of(concat({tag, fake_audio(10)})).title == "Hi");
+}
+
+TEST_CASE("a track number after spaces") {
+  const auto tag = id3v2(3, {frame(3, "TRCK", latin1_text("  7/12"))});
+  CHECK(tags_of(concat({tag, fake_audio(10)})).track == 7);
 }
