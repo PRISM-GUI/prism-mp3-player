@@ -37,6 +37,7 @@ namespace {
 constexpr std::string_view kMusicRoot = "/music";
 constexpr std::string_view kUpdating = "Updating library…";
 constexpr std::string_view kCannotWrite = "Cannot write the library index";
+constexpr std::string_view kCannotOpen = "Cannot open the library index";
 constexpr std::string_view kNoCard = "No SD card";
 constexpr std::uint32_t kBuilderStack = 32768;
 
@@ -51,11 +52,10 @@ public:
   void set_volume(float) override {}
 };
 
-// What the builder thread made of the card: the index as it stands, a new one waiting at
-// .prism-library.new, or nothing usable.
+// What the builder thread found of the card: the index it was given is current, a new one waits
+// at .prism-library.new, or none could be written.
 struct Build {
   enum class Kind { current, staged, failed } kind;
-  std::unique_ptr<player::Library> library;  // Kind::current
 };
 
 // What the builder thread leaves for the logic thread, merged until it takes it.
@@ -64,8 +64,9 @@ struct Handover {
   std::optional<Build> built;
 };
 
-// Builds the card's index off the logic thread and hands it over. FatFS cannot replace an index
-// that is open, so the logic thread drops its Library before install().
+// Builds the card's index off the logic thread and hands it over. The logic thread opens the
+// index and owns it throughout; the builder gets a plain pointer to ask is_current() (which
+// reads only the fingerprint the Library holds, never its file) and holds no Library of its own.
 class LibraryLoader {
 public:
   explicit LibraryLoader(player::Storage& storage) : storage_(storage) {}
@@ -73,20 +74,29 @@ public:
     if (thread_.joinable()) thread_.join();  // a std::thread must be joined before it dies
   }
 
-  // Each logic loop: the first starts the builder, then what it left is applied.
+  // Each logic loop: the first opens and shows the index and starts the builder, then what the
+  // builder left is applied.
   void pump(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown) {
-    if (!thread_.joinable()) start();
+    if (!thread_.joinable()) begin(ui, shown);
     auto handover = take();
     if (!handover) return;
     if (handover->updating) ui.set_library_status(std::string{kUpdating});
-    if (handover->built) apply(ui, shown, std::move(*handover->built));
+    if (handover->built) apply(ui, shown, handover->built->kind);
   }
 
 private:
+  // The index the card has today shows at once, even stale: the old one stays usable while the
+  // builder makes a new one.
+  void begin(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown) {
+    shown = player::Library::open(storage_, kMusicRoot);
+    ui.set_library(shown.get());
+    start(shown.get());
+  }
+
   // The builder's stack goes to PSRAM, as the logic thread's does: internal RAM is for the
   // render thread's 48 KB stack and the bands. The config it sets is the logic thread's own,
   // and threads it creates later would inherit it: put the previous one back.
-  void start() {
+  void start(const player::Library* index) {
     esp_pthread_cfg_t previous{};
     if (esp_pthread_get_cfg(&previous) != ESP_OK) previous = esp_pthread_get_default_config();
     esp_pthread_cfg_t cfg = previous;
@@ -94,39 +104,40 @@ private:
     cfg.pin_to_core = 0;
     cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     esp_pthread_set_cfg(&cfg);
-    thread_ = std::thread([this] { build(); });
+    thread_ = std::thread([this, index] { build(index); });
     esp_pthread_set_cfg(&previous);
   }
 
-  void build() {
-    auto current = player::Library::open(storage_, kMusicRoot);
-    if (current && current->is_current(storage_, kMusicRoot))
-      return post(Handover{false, Build{Build::Kind::current, std::move(current)}});
+  void build(const player::Library* index) {
+    if (index && index->is_current(storage_, kMusicRoot))
+      return post(Handover{false, Build{Build::Kind::current}});
     post(Handover{true, std::nullopt});
     // simplify: no cancellation: the run ends only with the board.
     const bool staged =
         player::Library::build(storage_, kMusicRoot, [](int) { return true; }, false);
-    post(Handover{false, Build{staged ? Build::Kind::staged : Build::Kind::failed, nullptr}});
+    post(Handover{false, Build{staged ? Build::Kind::staged : Build::Kind::failed}});
   }
 
-  void apply(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown, Build build) {
-    if (build.kind == Build::Kind::current) return show(ui, shown, std::move(build.library));
-    if (build.kind == Build::Kind::failed) return ui.set_library_status(std::string{kCannotWrite});
+  // Where the hand-over lands, on the logic thread.
+  void apply(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown, Build::Kind kind) {
+    if (kind == Build::Kind::current) return;
+    if (kind == Build::Kind::failed) return ui.set_library_status(std::string{kCannotWrite});
     install(ui, shown);
   }
 
-  // The order FatFS needs: the UI stops showing the old index, the old Library closes it, and
-  // only then may the staged file replace it.
+  // FatFS cannot replace an index that is open: the UI stops showing the old one, its Library
+  // closes it, and only then may the staged file take its place.
   void install(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown) {
     ui.set_library(nullptr);
     shown.reset();
     if (!player::Library::install(storage_, kMusicRoot))
       return ui.set_library_status(std::string{kCannotWrite});
-    show(ui, shown, player::Library::open(storage_, kMusicRoot));
+    show(ui, shown);
   }
 
-  void show(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown,
-            std::unique_ptr<player::Library> fresh) {
+  void show(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown) {
+    auto fresh = player::Library::open(storage_, kMusicRoot);
+    if (!fresh) return ui.set_library_status(std::string{kCannotOpen});
     ui.set_library(fresh.get());
     shown = std::move(fresh);
     korvo1::print_internal_heap("after library");
@@ -135,11 +146,11 @@ private:
   void post(Handover next) {
     const std::lock_guard lock(mutex_);
     if (!handover_) {
-      handover_ = std::move(next);
+      handover_ = next;
       return;
     }
     handover_->updating = handover_->updating || next.updating;
-    if (next.built) handover_->built = std::move(next.built);
+    if (next.built) handover_->built = next.built;
   }
 
   std::optional<Handover> take() {
