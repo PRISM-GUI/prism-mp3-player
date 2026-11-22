@@ -254,6 +254,23 @@ TEST_CASE("Select in Songs queues at most 500 songs from the selected one") {
   CHECK(storage.opened.back() == "/music/059/00599.mp3");
 }
 
+TEST_CASE("Select in a 2,000-song album queues the 500 songs from the selected one") {
+  MemoryStorage memory;
+  for (int n = 0; n < 2000; ++n)
+    add_song(memory, std::format("/music/huge/{:04}.mp3", n), std::format("Track {:04}", n), "Band", "Huge", n + 1);
+  REQUIRE(Library::build(memory, "/music", [](int) { return true; }));
+  const auto library = open_library(memory);
+  FakeOutput out;
+  Player player{memory, out};
+  PlayerUi ui{library.get(), player};
+  press(ui, {Button::Select, Rotate{1}, Button::Select, Button::Select, Rotate{100}});
+  REQUIRE(ui.screen_title() == "Huge");
+  press(ui, {Button::Select});
+  REQUIRE(player.queue().size() == 500);
+  CHECK(player.queue().front().title == "Track 0100");
+  CHECK(player.queue().back().title == "Track 0599");
+}
+
 TEST_CASE("no library: the Music screen says No music") {
   MemoryStorage s;
   FakeOutput out;
@@ -262,6 +279,21 @@ TEST_CASE("no library: the Music screen says No music") {
   press(ui, {Button::Select});
   CHECK(ui.screen_title() == "Music");
   CHECK(shows(ui, "No music"));
+  press(ui, {Button::Select});
+  CHECK(ui.screen_title() == "Music");
+}
+
+TEST_CASE("an empty card's library: the Music screen says No music") {
+  MemoryStorage s;
+  REQUIRE(Library::build(s, "/music", [](int) { return true; }));
+  const auto library = open_library(s);
+  FakeOutput out;
+  Player player{s, out};
+  PlayerUi ui{library.get(), player};
+  press(ui, {Button::Select});
+  CHECK(ui.screen_title() == "Music");
+  CHECK(shows(ui, "No music"));
+  CHECK_FALSE(shows(ui, "Artists"));
   press(ui, {Button::Select});
   CHECK(ui.screen_title() == "Music");
 }

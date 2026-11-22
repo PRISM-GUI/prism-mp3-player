@@ -68,6 +68,7 @@ public:
   // music, and with a library, the title bar of the library screens says it. set_library()
   // clears it.
   void set_library_status(std::string);
+  const std::string& library_status() const { return library_status_; }
 
   void canvas(render::DrawList&, core::Rect, const ui::WidgetNode&);
   void view(app::ViewBuilder&);
@@ -86,6 +87,7 @@ private:
   Place menu(Screen) const;
   Place list(ViewKey) const;
   std::vector<std::string> menu_rows(Screen) const;
+  bool has_music() const { return library_ && library_->count({View::Songs}) > 0; }
 
   void rotate(int steps);
   void select();

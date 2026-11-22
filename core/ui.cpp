@@ -9,8 +9,8 @@ namespace {
 
 using Screen = PlayerUi::Screen;
 
-// simplify: Select in the Songs view queues the 500 songs from the selected one, not all of
-// them (10,000 TrackRows would take MBs of RAM on the board). Upgrade: a Player queue that pages
+// simplify: Select in a song view (Songs, an album) queues the 500 songs from the selected one,
+// not all of them (10,000 TrackRows would take MBs of RAM on the board). Upgrade: a Player queue that pages
 // its tracks from the Library by view and row.
 constexpr std::size_t kSongsQueue = 500;
 
@@ -60,7 +60,7 @@ std::vector<std::string> PlayerUi::menu_rows(Screen s) const {
   switch (s) {
     case Screen::Main: return {"Music", "Now Playing", "Settings"};
     case Screen::Music:
-      if (!library_) return {};
+      if (!has_music()) return {};
       return {"Artists", "Albums", "Songs"};
     case Screen::Settings: return {"Output", "Bluetooth"};
     case Screen::List:
@@ -138,11 +138,9 @@ void PlayerUi::select_list_row() {
 }
 
 void PlayerUi::play_from(std::size_t row) {
-  const auto& key = here().key;
-  const auto first = key.view == View::Songs ? row : 0;
-  auto queue = library_->tracks(key, first, key.view == View::Songs ? kSongsQueue : here().count);
-  if (queue.size() <= row - first) return;
-  player_.play(std::move(queue), row - first);
+  auto queue = library_->tracks(here().key, row, kSongsQueue);
+  if (queue.empty()) return;
+  player_.play(std::move(queue), 0);
   open(menu(Screen::NowPlaying));
 }
 

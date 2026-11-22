@@ -166,7 +166,7 @@ void PlayerUi::draw_title(const Pen& pen) const {
   pen.dl.filled_rect(rect(0, 0, width, kTitleHeight), kTitleBar);
   pen.dl.filled_rect(rect(0, kTitleHeight - 1, width, 1), kRule);
   const bool library_screen = here().screen == Screen::Music || here().screen == Screen::List;
-  const bool updating = library_ && library_screen && !library_status_.empty();
+  const bool updating = has_music() && library_screen && !library_status_.empty();
   centred_text(pen, updating ? library_status_ : std::string{screen_title()}, rect(kTitleReserve, 0, width - 2 * kTitleReserve, kTitleHeight - 1),
                kText, kInk, kBold);
   battery(pen.dl, width - 50, 7);
@@ -177,7 +177,7 @@ void PlayerUi::draw_title(const Pen& pen) const {
 
 void PlayerUi::draw_menu(const Pen& pen) const {
   const auto& p = here();
-  if (p.screen == Screen::Music && !library_) return centred_note(pen, 110, library_status_.empty() ? "No music" : library_status_);
+  if (p.screen == Screen::Music && !has_music()) return centred_note(pen, 110, library_status_.empty() ? "No music" : library_status_);
   const auto rows = menu_rows(p.screen);
   const bool opens = p.screen != Screen::Settings;
   for (std::size_t i = p.top; i < std::min(rows.size(), p.top + kVisibleRows); ++i) {
