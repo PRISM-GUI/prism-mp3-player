@@ -1,0 +1,4 @@
+[wrap-git]
+url = https://github.com/PRISM-GUI/PRISM.git
+revision = main
+depth = 1
