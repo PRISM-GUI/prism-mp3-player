@@ -10,7 +10,7 @@ prism_dep = prism.get_variable('prism_dep')
 
 core_inc = include_directories('.')
 
-player_core = static_library('player_core', files('core/memory_storage.cpp'),
+player_core = static_library('player_core', files('core/memory_storage.cpp', 'core/tags.cpp'),
   include_directories : core_inc,
   dependencies : prism_core_dep,
 )
