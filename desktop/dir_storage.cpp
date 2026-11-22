@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <fstream>
+#include <optional>
 
 namespace player {
 namespace fs = std::filesystem;
@@ -28,10 +29,16 @@ std::int64_t unix_seconds(fs::file_time_type t) {
   return std::chrono::duration_cast<std::chrono::seconds>(sys.time_since_epoch()).count();
 }
 
-DirEntry to_entry(const fs::directory_entry& e) {
-  const bool is_dir = e.is_directory();
-  return {e.path().filename().string(), is_dir, is_dir ? 0 : e.file_size(),
-          is_dir ? 0 : unix_seconds(e.last_write_time())};
+std::optional<DirEntry> to_entry(const fs::directory_entry& e) {
+  std::error_code ec;
+  const auto name = e.path().filename().string();
+  if (e.is_directory(ec)) return DirEntry{name, true, 0, 0};
+  if (ec || !e.is_regular_file(ec)) return std::nullopt;
+  const auto size = e.file_size(ec);
+  if (ec) return std::nullopt;
+  const auto mtime = e.last_write_time(ec);
+  if (ec) return std::nullopt;
+  return DirEntry{name, false, size, unix_seconds(mtime)};
 }
 
 }  // namespace
@@ -46,7 +53,7 @@ std::vector<DirEntry> DirStorage::list(std::string_view dir) {
   std::vector<DirEntry> out;
   for (fs::directory_iterator it{resolve(dir), ec}; !ec && it != fs::directory_iterator{};
        it.increment(ec))
-    out.push_back(to_entry(*it));
+    if (auto entry = to_entry(*it)) out.push_back(*std::move(entry));
   return out;
 }
 

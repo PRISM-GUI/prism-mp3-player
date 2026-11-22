@@ -72,10 +72,6 @@ std::unique_ptr<File> MemoryStorage::open(std::string_view path) {
   return std::make_unique<MemoryFile>(it->second.data);
 }
 
-}  // namespace player
-
-namespace player {
-
 std::unique_ptr<std::ostream> MemoryStorage::create(std::string_view path) {
   return std::make_unique<CommitOnClose>(
       [this, p = std::string{path}](std::string content) { add(p, to_bytes(content)); });

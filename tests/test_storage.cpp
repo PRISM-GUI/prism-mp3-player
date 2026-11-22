@@ -1,12 +1,14 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "core/memory_storage.hpp"
 #include "desktop/dir_storage.hpp"
+#include "tests/temp_dir.hpp"
 
 #include <doctest.h>
 
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <sys/stat.h>
 #include <ostream>
 
 using namespace player;
@@ -70,19 +72,6 @@ void fill(MemoryStorage& s) {
   s.add("/music/ten.bin", bytes(10));
 }
 
-struct TempDir {
-  std::filesystem::path path = std::filesystem::temp_directory_path() / "player_storage_test";
-  TempDir() {
-    std::filesystem::remove_all(path);
-    std::filesystem::create_directories(path / "music" / "x");
-  }
-  ~TempDir() { std::filesystem::remove_all(path); }
-  void write(const std::filesystem::path& rel, const std::vector<std::byte>& data) const {
-    std::ofstream(path / rel, std::ios::binary)
-        .write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
-  }
-};
-
 void fill(const TempDir& d) {
   d.write("music/a.mp3", bytes(5));
   d.write("music/x/b.mp3", bytes(3));
@@ -126,4 +115,15 @@ TEST_CASE("create then open reads back what was written, on disk") {
   TempDir d;
   DirStorage s{d.path};
   check_create_then_open(s);
+}
+
+TEST_CASE("DirStorage skips entries it cannot stat, such as a FIFO") {
+  TempDir d;
+  d.write("music/a.mp3", bytes(5));
+  REQUIRE(mkfifo((d.path / "music" / "pipe").c_str(), 0600) == 0);
+  DirStorage s{d.path};
+  std::vector<DirEntry> es;
+  CHECK_NOTHROW(es = s.list("/music"));
+  CHECK(find(es, "a.mp3"));
+  CHECK_FALSE(find(es, "pipe"));
 }
