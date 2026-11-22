@@ -2,7 +2,9 @@
 #include "core/fold.hpp"
 #include "core/library.hpp"
 #include "core/memory_storage.hpp"
+#include "desktop/dir_storage.hpp"
 #include "tests/tag_builder.hpp"
+#include "tests/temp_dir.hpp"
 
 #include <doctest.h>
 
@@ -13,6 +15,7 @@
 #include <format>
 #include <malloc.h>
 #include <new>
+#include <random>
 
 using namespace player;
 using namespace player::testing;
@@ -20,6 +23,7 @@ using namespace player::testing;
 namespace {
 
 std::atomic<long long> live_heap_bytes{0};
+std::atomic<long long> peak_heap_bytes{0};
 
 }  // namespace
 
@@ -27,7 +31,8 @@ std::atomic<long long> live_heap_bytes{0};
 void* operator new(std::size_t n) {
   void* p = std::malloc(n ? n : 1);
   if (!p) throw std::bad_alloc{};
-  live_heap_bytes += static_cast<long long>(malloc_usable_size(p));
+  const auto live = live_heap_bytes += static_cast<long long>(malloc_usable_size(p));
+  for (auto peak = peak_heap_bytes.load(); live > peak && !peak_heap_bytes.compare_exchange_weak(peak, live);) {}
   return p;
 }
 void operator delete(void* p) noexcept {
@@ -136,6 +141,9 @@ TEST_CASE("build then open lists artists, their albums and songs in order") {
   CHECK(lib->count({View::Artists}) == 2);
   CHECK(lib->names({View::Artists}, 0, 10) == Names{"abba", "Beta Band"});
   CHECK(lib->names({View::Albums}, 0, 10) == Names{"Alpha", "Gold", "Zeta"});
+  CHECK(lib->album_artists({View::Albums}, 0, 10) == Names{"Beta Band", "abba", "Beta Band"});
+  CHECK(lib->album_artists({View::AlbumsOfArtist, "Beta Band"}, 1, 10) == Names{"Beta Band"});
+  CHECK(lib->album_artists({View::Songs}, 0, 10).empty());
   CHECK(lib->count({View::AlbumsOfArtist, "Beta Band"}) == 2);
   CHECK(lib->names({View::AlbumsOfArtist, "Beta Band"}, 0, 10) == Names{"Alpha", "Zeta"});
   CHECK(lib->names({View::AlbumsOfArtist, "Beta Band"}, 1, 10) == Names{"Zeta"});
@@ -149,7 +157,9 @@ TEST_CASE("build then open lists artists, their albums and songs in order") {
   CHECK(rows[0].album == "Gold");
   CHECK(rows[2].track == 3);
 
-  CHECK(titles(lib->tracks({View::SongsOfAlbum, "", "Zeta"}, 0, 10)) == Names{"First", "Second"});
+  CHECK(titles(lib->tracks({View::SongsOfAlbum, "Beta Band", "Zeta"}, 0, 10)) ==
+        Names{"First", "Second"});
+  CHECK(lib->tracks({View::SongsOfAlbum, "", "Zeta"}, 0, 10).empty());
   CHECK(lib->count({View::Songs}) == 6);
   CHECK(titles(lib->tracks({View::Songs}, 0, 10)) ==
         Names{"First", "One", "Only", "Second", "Three", "Two"});
@@ -189,6 +199,24 @@ TEST_CASE("a track without artist or album sorts last with an empty name") {
   CHECK(rows[0].title == "untagged");
 }
 
+TEST_CASE("an album is an artist's: two artists' same-named albums are two rows") {
+  MemoryStorage s;
+  add_song(s, "/music/1.mp3", "Hit A", "Ann", "Greatest Hits", 1);
+  add_song(s, "/music/2.mp3", "Hit B", "Bob", "Greatest Hits", 1);
+  add_song(s, "/music/3.mp3", "Lost", "", "Greatest Hits", 2);
+  const auto lib = built(s);
+  CHECK(lib->count({View::Albums}) == 3);
+  CHECK(lib->names({View::Albums}, 0, 10) ==
+        Names{"Greatest Hits", "Greatest Hits", "Greatest Hits"});
+  CHECK(lib->album_artists({View::Albums}, 0, 10) == Names{"Ann", "Bob", ""});
+  CHECK(titles(lib->tracks({View::SongsOfAlbum, "Ann", "Greatest Hits"}, 0, 10)) ==
+        Names{"Hit A"});
+  CHECK(titles(lib->tracks({View::SongsOfAlbum, "Bob", "Greatest Hits"}, 0, 10)) ==
+        Names{"Hit B"});
+  CHECK(titles(lib->tracks({View::SongsOfAlbum, "", "Greatest Hits"}, 0, 10)) ==
+        Names{"Lost"});
+}
+
 TEST_CASE("no /music or an empty one: count is 0 everywhere and open after build works") {
   MemoryStorage none;
   MemoryStorage empty;
@@ -209,12 +237,18 @@ TEST_CASE("open without an index returns null") {
   CHECK(Library::open(s, "/music") == nullptr);
 }
 
-TEST_CASE("a changed card makes open return null") {
+TEST_CASE("a changed card still opens, and is_current says it changed") {
   MemoryStorage s;
   fill_six(s);
   REQUIRE(Library::build(s, "/music", keep_going));
+  CHECK(Library::open(s, "/music")->is_current(s, "/music"));
   add_song(s, "/music/new.mp3", "New", "abba", "Gold", 4);
-  CHECK(Library::open(s, "/music") == nullptr);
+  const auto old = Library::open(s, "/music");
+  REQUIRE(old);
+  CHECK(old->count({View::Songs}) == 6);
+  CHECK_FALSE(old->is_current(s, "/music"));
+  REQUIRE(Library::build(s, "/music", keep_going));
+  CHECK(Library::open(s, "/music")->is_current(s, "/music"));
 }
 
 TEST_CASE("a truncated index makes open return null") {
@@ -230,25 +264,33 @@ TEST_CASE("a truncated index makes open return null") {
   }
 }
 
-TEST_CASE("a damaged index never crashes a query") {
+TEST_CASE("a damaged index body makes open return null") {
   MemoryStorage s;
   fill_six(s);
   REQUIRE(Library::build(s, "/music", keep_going));
-  auto index = read_all(s, "/music/.prism-library");
-  std::fill(index.begin() + 40, index.end(), std::byte{0xff});
-  s.add("/music/.prism-library", index);
-  const auto lib = Library::open(s, "/music");
-  REQUIRE(lib);
-  for (const auto v : {View::Artists, View::Albums, View::Songs, View::AlbumsOfArtist,
-                       View::SongsOfAlbum}) {
-    const ViewKey key{v, "abba", "Gold"};
-    CHECK_NOTHROW(lib->count(key));
-    CHECK_NOTHROW(lib->names(key, 0, 10));
-    CHECK_NOTHROW(lib->tracks(key, 0, 10));
-  }
-  index[0] = std::byte{'X'};
-  s.add("/music/.prism-library", index);
+  const auto index = read_all(s, "/music/.prism-library");
+  auto all_ff = index;
+  std::fill(all_ff.begin() + 40, all_ff.end(), std::byte{0xff});
+  s.add("/music/.prism-library", all_ff);
   CHECK(Library::open(s, "/music") == nullptr);
+
+  std::mt19937 rng{42};
+  std::uniform_int_distribution<std::size_t> position{40, index.size() - 1};
+  std::uniform_int_distribution<int> bit{0, 7};
+  for (int i = 0; i < 50; ++i) {
+    auto flipped = index;
+    const auto at = position(rng);
+    flipped[at] ^= std::byte(1 << bit(rng));
+    s.add("/music/.prism-library", flipped);
+    CHECK_MESSAGE(Library::open(s, "/music") == nullptr, "flipped a bit at ", at);
+  }
+
+  auto bad_magic = index;
+  bad_magic[0] = std::byte{'X'};
+  s.add("/music/.prism-library", bad_magic);
+  CHECK(Library::open(s, "/music") == nullptr);
+  s.add("/music/.prism-library", index);
+  CHECK(Library::open(s, "/music"));
 }
 
 TEST_CASE("10,000 tracks: rows come from the index, not from memory") {
@@ -285,6 +327,39 @@ TEST_CASE("10,000 tracks: rows come from the index, not from memory") {
   CHECK(paged->names({View::AlbumsOfArtist, "Artist 500"}, 0, 10) == Names{"Album 500"});
   CHECK(paged->tracks({View::SongsOfAlbum, "Artist 500", "Album 500"}, 0, 20).size() == 10);
   CHECK(counting.bytes_read <= 64 * 1024);
+}
+
+TEST_CASE("building 10,000 tracks with realistic names peaks under 4 MB of heap") {
+  // On disk, so the in-memory storage's own copy of the index does not count.
+  TempDir d;
+  for (int a = 0; a < 500; ++a)
+    for (int al = 0; al < 2; ++al) {
+      const auto artist = std::format("The Remarkable Artist No {:04}", a);
+      const auto album = std::format("A Long Album Title Volume {:04}-{}", a, al);
+      const auto dir = std::format("music/Artist {:04}/Album {:04}-{}", a, a, al);
+      std::filesystem::create_directories(d.path / dir);
+      for (int t = 0; t < 10; ++t) {
+        const int n = (a * 2 + al) * 10 + t;
+        d.write(std::format("{}/{:02} A Fairly Long Song {:05}.mp3", dir, t + 1, n),
+                song(std::format("A Fairly Long Song Title {:05}", n), artist, album, t + 1));
+      }
+    }
+  DirStorage s{d.path};
+
+  const auto baseline = live_heap_bytes.load();
+  peak_heap_bytes = baseline;
+  const auto start = std::chrono::steady_clock::now();
+  REQUIRE(Library::build(s, "/music", keep_going));
+  const auto build_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+  const auto peak = peak_heap_bytes.load() - baseline;
+  std::printf("10,000-track build from disk: %lld ms; peak heap: %lld bytes\n",
+              static_cast<long long>(build_ms.count()), peak);
+  CHECK(peak <= 4 * 1024 * 1024);
+  const auto lib = Library::open(s, "/music");
+  REQUIRE(lib);
+  CHECK(lib->count({View::Songs}) == 10000);
+  CHECK(lib->count({View::Albums}) == 1000);
 }
 
 TEST_CASE("a stopped build keeps the old index") {

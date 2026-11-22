@@ -11,19 +11,26 @@
 namespace player::index_format {
 
 constexpr std::string_view magic = "PRLB";
-constexpr std::uint32_t version = 1;
+constexpr std::uint32_t version = 2;
 constexpr std::string_view file_name = ".prism-library";
 
 constexpr std::size_t header_size = 40;
 constexpr std::size_t ref_size = 8;
 constexpr std::size_t track_size = 4 * ref_size + 4;
 constexpr std::size_t perm_size = 4;
-constexpr std::size_t group_size = ref_size + 8;
-constexpr std::size_t artist_size = group_size + 8;
+constexpr std::size_t artist_size = ref_size + 16;
+constexpr std::size_t album_size = 2 * ref_size + 8;
+// Every string in the index is shorter: tag fields are capped at 256 bytes, and the scan skips
+// longer paths.
+constexpr std::size_t max_string = 1024;
+
+struct StrRef {
+  std::uint32_t offset = 0, size = 0;
+};
 
 struct Header {
   std::uint64_t fingerprint = 0;
-  std::uint32_t tracks = 0, artists = 0, artist_albums = 0, albums = 0, pool_bytes = 0;
+  std::uint32_t tracks = 0, artists = 0, albums = 0, pool_bytes = 0, crc = 0;
 };
 
 inline Library::Layout layout_of(const Header& h) {
@@ -36,10 +43,9 @@ inline Library::Layout layout_of(const Header& h) {
   };
   l.tracks = next(h.tracks, track_size);
   l.songs = next(h.tracks, perm_size);
-  l.album_songs = next(h.tracks, perm_size);
   l.artists = next(h.artists, artist_size);
-  l.artist_albums = next(h.artist_albums, group_size);
-  l.albums = next(h.albums, group_size);
+  l.artist_albums = next(h.albums, album_size);
+  l.albums = next(h.albums, perm_size);
   l.pool = next(h.pool_bytes, 1);
   return l;
 }
@@ -63,6 +69,8 @@ inline std::uint32_t get32(const std::byte* p) {
 inline std::uint64_t get64(const std::byte* p) {
   return get32(p) | std::uint64_t{get32(p + 4)} << 32;
 }
+
+inline StrRef ref_at(const std::byte* p) { return {get32(p), get32(p + 4)}; }
 
 inline std::string join(std::string_view dir, std::string_view name) {
   std::string out{dir};

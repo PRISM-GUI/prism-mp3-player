@@ -17,8 +17,8 @@ struct TrackRow {
 
 enum class View { Artists, Albums, Songs, AlbumsOfArtist, SongsOfAlbum };
 
-// artist/album: the filter where the view needs one. For SongsOfAlbum an empty artist means any
-// artist, so an album reached from the Albums view lists every artist's tracks of that name.
+// artist/album: the filter where the view needs one. An album is an artist's: SongsOfAlbum
+// needs both, and an empty artist is the unknown artist, never "any".
 struct ViewKey {
   View view;
   std::string artist{}, album{};
@@ -34,9 +34,11 @@ struct IndexSection {
 // file at each call.
 class Library {
 public:
-  // Opens the index at <root>/.prism-library; returns null when it is missing, damaged, or
-  // does not match the card (fingerprint differs).
+  // Opens the index at <root>/.prism-library; returns null when it is missing or damaged. An
+  // index of a card that changed since still opens: check is_current() and rebuild.
   static std::unique_ptr<Library> open(Storage&, std::string_view root);
+  // Whether the card still holds the files the index was built from.
+  bool is_current(Storage&, std::string_view root) const;
   // Scans <root> recursively for .mp3, reads tags, writes the index. `progress(done)` is
   // called every 100 files; returning false stops (the old index stays).
   static bool build(Storage&, std::string_view root, const std::function<bool(int)>& progress);
@@ -46,16 +48,20 @@ public:
   // song views. A view of the other kind gives no rows.
   std::vector<std::string> names(const ViewKey&, std::size_t first, std::size_t n) const;
   std::vector<TrackRow> tracks(const ViewKey&, std::size_t first, std::size_t n) const;
+  // The artist of each row of an Albums or AlbumsOfArtist view, to make its SongsOfAlbum key.
+  std::vector<std::string> album_artists(const ViewKey&, std::size_t first, std::size_t n) const;
 
   struct Layout {
-    IndexSection tracks, songs, album_songs, artists, artist_albums, albums, pool;
+    IndexSection tracks, songs, artists, artist_albums, albums, pool;
   };
 
 private:
-  Library(std::unique_ptr<File> file, Layout layout) : file_(std::move(file)), layout_(layout) {}
+  Library(std::unique_ptr<File> file, Layout layout, std::uint64_t fingerprint)
+      : file_(std::move(file)), layout_(layout), fingerprint_(fingerprint) {}
 
   std::unique_ptr<File> file_;
   Layout layout_;
+  std::uint64_t fingerprint_;
 };
 
 // Over the paths, sizes and mtimes of the .mp3 files under root.

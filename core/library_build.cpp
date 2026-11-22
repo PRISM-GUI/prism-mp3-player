@@ -1,13 +1,17 @@
 // Scans a card and writes its index; the byte layout is described at the top of library.cpp.
+// Memory: every string goes once into one pool (artist and album names once per distinct
+// name), tracks are 28-byte records, and the file is streamed out in two passes (the CRC
+// first, then the bytes), so 10,000 tracks peak around 2 MB.
 #include "core/fold.hpp"
 #include "core/index_format.hpp"
 #include "core/library.hpp"
 #include "core/tags.hpp"
 
+#include <prism/profile/trace_format.hpp>
+
 #include <algorithm>
-#include <array>
+#include <map>
 #include <numeric>
-#include <optional>
 #include <ostream>
 #include <tuple>
 
@@ -16,249 +20,294 @@ namespace {
 
 using namespace index_format;
 
-struct FileInfo {
-  std::string path;
-  std::uint64_t size;
-  std::int64_t mtime;
+class Pool {
+public:
+  StrRef add(std::string_view s) {
+    const StrRef r{static_cast<std::uint32_t>(bytes_.size()), static_cast<std::uint32_t>(s.size())};
+    bytes_ += s;
+    return r;
+  }
+  std::string_view get(StrRef r) const { return std::string_view{bytes_}.substr(r.offset, r.size); }
+  const std::string& bytes() const { return bytes_; }
+
+private:
+  std::string bytes_;
+};
+
+// Distinct names, each stored once in the pool.
+class Names {
+public:
+  std::uint32_t id(Pool& pool, std::string_view name) {
+    const auto it = ids_.find(name);
+    if (it != ids_.end()) return it->second;
+    refs_.push_back(pool.add(name));
+    return ids_.emplace(std::string{name}, refs_.size() - 1).first->second;
+  }
+  StrRef ref(std::uint32_t id) const { return refs_[id]; }
+  std::size_t size() const { return refs_.size(); }
+
+  // rank[id]: the name's position in sort_key() order.
+  std::vector<std::uint32_t> ranks(const Pool& pool) const {
+    std::vector<std::string> keys;
+    for (const auto r : refs_) keys.push_back(sort_key(pool.get(r)));
+    std::vector<std::uint32_t> by_key(refs_.size());
+    std::iota(by_key.begin(), by_key.end(), 0u);
+    std::ranges::sort(by_key, {}, [&](std::uint32_t id) -> const std::string& { return keys[id]; });
+    std::vector<std::uint32_t> rank(refs_.size());
+    for (std::uint32_t k = 0; k < by_key.size(); ++k) rank[by_key[k]] = k;
+    return rank;
+  }
+
+private:
+  std::map<std::string, std::uint32_t, std::less<>> ids_;
+  std::vector<StrRef> refs_;
 };
 
 bool is_mp3(std::string_view name) {
-  if (name.size() < 4) return false;
-  const auto ext = fold_for_sort(name.substr(name.size() - 4));
-  return ext == ".mp3";
+  return name.size() >= 4 && fold_for_sort(name.substr(name.size() - 4)) == ".mp3";
 }
 
-// Dot names are skipped: the index itself, and the "._x.mp3" metadata files macOS leaves.
-void scan_into(Storage& storage, const std::string& dir, std::vector<FileInfo>& out) {
+// Calls on_file(path, entry) for each .mp3 under dir, in path order. Dot names are skipped: the
+// index itself, and the "._x.mp3" files macOS leaves; so are paths the index could not hold.
+template <class OnFile>
+void walk(Storage& storage, const std::string& dir, OnFile& on_file) {
   auto entries = storage.list(dir);
   std::ranges::sort(entries, {}, &DirEntry::name);
   for (const auto& e : entries) {
     if (e.name.starts_with('.')) continue;
-    if (e.is_dir) scan_into(storage, join(dir, e.name), out);
-    else if (is_mp3(e.name)) out.push_back({join(dir, e.name), e.size, e.mtime});
+    const auto path = join(dir, e.name);
+    if (e.is_dir) walk(storage, path, on_file);
+    else if (is_mp3(e.name) && path.size() <= max_string) on_file(path, e);
   }
-}
-
-std::vector<FileInfo> scan(Storage& storage, std::string_view root) {
-  std::vector<FileInfo> out;
-  scan_into(storage, std::string{root}, out);
-  return out;
 }
 
 // FNV-1a, 64-bit: http://www.isthe.com/chongo/tech/comp/fnv/
-std::uint64_t fnv1a(std::uint64_t h, std::string_view bytes) {
-  for (const char c : bytes) h = (h ^ static_cast<unsigned char>(c)) * 0x100000001b3ull;
-  return h;
-}
-
-std::uint64_t fingerprint_of(const std::vector<FileInfo>& files) {
-  std::uint64_t h = 0xcbf29ce484222325ull;
-  for (const auto& f : files) {
-    std::string record = f.path;
+class Fingerprint {
+public:
+  void add(std::string_view path, const DirEntry& e) {
+    std::string record{path};
     record += '\0';
-    put64(record, f.size);
-    put64(record, static_cast<std::uint64_t>(f.mtime));
-    h = fnv1a(h, record);
+    put64(record, e.size);
+    put64(record, static_cast<std::uint64_t>(e.mtime));
+    for (const char c : record) h_ = (h_ ^ static_cast<unsigned char>(c)) * 0x100000001b3ull;
   }
-  return h;
-}
+  std::uint64_t value() const { return h_; }
 
-struct Entry {
-  TrackRow row;
-  std::string artist_key, album_key, title_key;
+private:
+  std::uint64_t h_ = 0xcbf29ce484222325ull;
 };
+
+struct Track {
+  StrRef path, title;
+  std::uint32_t artist, album;  // ids in Collected's Names
+  std::int32_t number;
+  std::uint32_t title_rank = 0;
+};
+
+struct Collected {
+  Pool pool;
+  std::vector<StrRef> paths;
+  std::uint64_t fingerprint = 0;
+  std::vector<Track> tracks;
+  Names artists, albums;
+};
+
+Collected scan(Storage& storage, std::string_view root) {
+  Collected c;
+  Fingerprint fp;
+  auto on_file = [&](std::string_view path, const DirEntry& e) {
+    fp.add(path, e);
+    c.paths.push_back(c.pool.add(path));
+  };
+  walk(storage, std::string{root}, on_file);
+  c.fingerprint = fp.value();
+  return c;
+}
 
 std::string_view file_name_of(std::string_view path) { return path.substr(path.rfind('/') + 1); }
 
-std::optional<Entry> read_entry(Storage& storage, const FileInfo& info) {
-  const auto file = storage.open(info.path);
-  if (!file) return std::nullopt;
-  auto t = read_tags(*file, file_name_of(info.path));
-  Entry e{{info.path, std::move(t.title), std::move(t.artist), std::move(t.album), t.track}, {}, {}, {}};
-  e.artist_key = sort_key(e.row.artist);
-  e.album_key = sort_key(e.row.album);
-  e.title_key = sort_key(e.row.title);
-  return e;
+void read_track(Storage& storage, Collected& c, StrRef path) {
+  const auto file = storage.open(c.pool.get(path));
+  if (!file) return;
+  const auto t = read_tags(*file, file_name_of(c.pool.get(path)));
+  const auto title = c.pool.add(t.title);
+  c.tracks.push_back({path, title, c.artists.id(c.pool, t.artist), c.albums.id(c.pool, t.album),
+                      t.track});
 }
 
-std::optional<std::vector<Entry>> read_entries(Storage& storage, const std::vector<FileInfo>& files,
-                                               const std::function<bool(int)>& progress) {
-  std::vector<Entry> out;
-  out.reserve(files.size());
-  for (std::size_t i = 0; i < files.size(); ++i) {
-    if (auto e = read_entry(storage, files[i])) out.push_back(*std::move(e));
+bool read_tracks(Storage& storage, Collected& c, const std::function<bool(int)>& progress) {
+  c.tracks.reserve(c.paths.size());
+  for (std::size_t i = 0; i < c.paths.size(); ++i) {
+    read_track(storage, c, c.paths[i]);
     const auto done = static_cast<int>(i + 1);
-    if (done % 100 == 0 && !progress(done)) return std::nullopt;
+    if (done % 100 == 0 && !progress(done)) return false;
   }
-  return out;
+  c.paths = {};
+  return true;
 }
 
-auto main_order(const Entry& e) {
-  return std::tie(e.artist_key, e.album_key, e.row.track, e.title_key, e.row.path);
-}
-auto title_order(const Entry& e) {
-  return std::tie(e.title_key, e.artist_key, e.album_key, e.row.track, e.row.path);
-}
-auto album_order(const Entry& e) {
-  return std::tie(e.album_key, e.row.track, e.title_key, e.artist_key, e.row.path);
-}
-
-template <class Order>
-std::vector<std::uint32_t> permutation(const std::vector<Entry>& entries, Order order) {
-  std::vector<std::uint32_t> p(entries.size());
-  std::iota(p.begin(), p.end(), 0u);
-  std::ranges::sort(p, {}, [&](std::uint32_t i) { return order(entries[i]); });
-  return p;
+// simplify: titles are folded in the comparator, twice per comparison, instead of keeping a
+// key per track: no extra memory, ~300k folds for 10,000 tracks. Keep the keys if the board's
+// build is too slow.
+void rank_titles(std::vector<Track>& tracks, const Pool& pool) {
+  std::vector<std::uint32_t> by_title(tracks.size());
+  std::iota(by_title.begin(), by_title.end(), 0u);
+  const auto title = [&](std::uint32_t i) { return pool.get(tracks[i].title); };
+  std::ranges::sort(by_title, [&](auto a, auto b) { return sort_key(title(a)) < sort_key(title(b)); });
+  std::uint32_t rank = 0;
+  for (std::size_t k = 0; k < by_title.size(); ++k) {
+    if (k > 0 && title(by_title[k]) != title(by_title[k - 1])) ++rank;
+    tracks[by_title[k]].title_rank = rank;
+  }
 }
 
-struct Group {
-  std::uint32_t first, count;
+struct Artist {
+  std::uint32_t name, first, count, first_album, album_count;
 };
 
-// The runs of [begin, end) whose consecutive members are `same`.
-template <class Same>
-std::vector<Group> runs(std::uint32_t begin, std::uint32_t end, Same same) {
-  std::vector<Group> out;
-  for (auto i = begin; i < end; ++i)
-    if (i == begin || !same(i - 1, i)) out.push_back({i, 1});
-    else ++out.back().count;
-  return out;
-}
-
-struct Pool {
-  std::string bytes;
-  std::vector<std::array<std::uint32_t, 8>> refs;  // per track: path, title, artist, album
+struct Album {
+  std::uint32_t name, artist, first, count;
 };
-
-Pool pool_of(const std::vector<Entry>& entries) {
-  Pool p;
-  for (const auto& e : entries) {
-    auto& r = p.refs.emplace_back();
-    const std::string_view fields[] = {e.row.path, e.row.title, e.row.artist, e.row.album};
-    for (std::size_t f = 0; f < 4; ++f) {
-      r[2 * f] = static_cast<std::uint32_t>(p.bytes.size());
-      r[2 * f + 1] = static_cast<std::uint32_t>(fields[f].size());
-      p.bytes += fields[f];
-    }
-  }
-  return p;
-}
-
-enum Field { path_field, title_field, artist_field, album_field };
-
-void put_ref(std::string& out, const Pool& pool, std::uint32_t track, Field f) {
-  put32(out, pool.refs[track][2 * f]);
-  put32(out, pool.refs[track][2 * f + 1]);
-}
 
 // The index in memory while it is built, in the file's terms.
 struct Index {
-  std::vector<Entry> entries;  // main order
-  std::vector<std::uint32_t> songs, album_songs;
-  std::vector<Group> artists, artist_albums, albums;
-  std::vector<Group> albums_per_artist;  // ranges of artist_albums, one per artist
-  Pool pool;
+  Collected c;  // tracks in main order
+  std::vector<std::uint32_t> songs;
+  std::vector<Artist> artists;
+  std::vector<Album> albums;  // by artist, then name
+  std::vector<std::uint32_t> albums_by_name;
 };
 
-Index index_of(std::vector<Entry> entries) {
-  Index x;
-  std::ranges::sort(entries, {}, main_order);
-  x.entries = std::move(entries);
-  const auto& es = x.entries;
-  const auto n = static_cast<std::uint32_t>(es.size());
-  x.songs = permutation(es, title_order);
-  x.album_songs = permutation(es, album_order);
-  x.artists = runs(0, n, [&](auto a, auto b) { return es[a].row.artist == es[b].row.artist; });
-  for (const auto& artist : x.artists) {
-    const auto albums = runs(artist.first, artist.first + artist.count,
-                             [&](auto a, auto b) { return es[a].row.album == es[b].row.album; });
-    x.albums_per_artist.push_back({static_cast<std::uint32_t>(x.artist_albums.size()),
-                                   static_cast<std::uint32_t>(albums.size())});
-    x.artist_albums.insert(x.artist_albums.end(), albums.begin(), albums.end());
+// The runs of [begin, end) whose consecutive members are `same`, as (first, count).
+template <class Same>
+std::vector<std::pair<std::uint32_t, std::uint32_t>> runs(std::uint32_t begin, std::uint32_t end,
+                                                          Same same) {
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> out;
+  for (auto i = begin; i < end; ++i)
+    if (i == begin || !same(i - 1, i)) out.emplace_back(i, 1);
+    else ++out.back().second;
+  return out;
+}
+
+template <class Order>
+std::vector<std::uint32_t> sorted_indexes(std::size_t n, Order order) {
+  std::vector<std::uint32_t> p(n);
+  std::iota(p.begin(), p.end(), 0u);
+  std::ranges::sort(p, {}, order);
+  return p;
+}
+
+void group(Index& x) {
+  const auto& ts = x.c.tracks;
+  const auto n = static_cast<std::uint32_t>(ts.size());
+  for (const auto& [first, count] : runs(0, n, [&](auto a, auto b) { return ts[a].artist == ts[b].artist; })) {
+    const auto albums = runs(first, first + count, [&](auto a, auto b) { return ts[a].album == ts[b].album; });
+    x.artists.push_back({ts[first].artist, first, count, static_cast<std::uint32_t>(x.albums.size()),
+                         static_cast<std::uint32_t>(albums.size())});
+    for (const auto& [af, ac] : albums) x.albums.push_back({ts[af].album, ts[af].artist, af, ac});
   }
-  x.albums = runs(0, n, [&](auto a, auto b) {
-    return es[x.album_songs[a]].row.album == es[x.album_songs[b]].row.album;
+}
+
+Index index_of(Collected c) {
+  rank_titles(c.tracks, c.pool);
+  const auto artist_rank = c.artists.ranks(c.pool);
+  const auto album_rank = c.albums.ranks(c.pool);
+  std::ranges::sort(c.tracks, {}, [&](const Track& t) {
+    return std::tuple{artist_rank[t.artist], album_rank[t.album], t.number, t.title_rank, t.path.offset};
   });
-  x.pool = pool_of(es);
+  Index x{std::move(c), {}, {}, {}, {}};
+  const auto& ts = x.c.tracks;
+  x.songs = sorted_indexes(ts.size(), [&](std::uint32_t i) {
+    return std::tuple{ts[i].title_rank, artist_rank[ts[i].artist], album_rank[ts[i].album], ts[i].number, i};
+  });
+  group(x);
+  x.albums_by_name = sorted_indexes(x.albums.size(), [&](std::uint32_t i) {
+    return std::pair{album_rank[x.albums[i].name], artist_rank[x.albums[i].artist]};
+  });
   return x;
 }
 
-std::string header_bytes(const Index& x, std::uint64_t fingerprint) {
+// Where the bytes go: a CRC, and the stream when there is one, through a small buffer.
+class Sink {
+public:
+  explicit Sink(std::ostream* out) : out_(out) {}
+  void u32(std::uint32_t v) {
+    put32(buf_, v);
+    if (buf_.size() >= 4096) flush();
+  }
+  void ref(StrRef r) {
+    u32(r.offset);
+    u32(r.size);
+  }
+  void bytes(std::string_view s) {
+    flush();
+    feed(s);
+  }
+  void flush() {
+    feed(buf_);
+    buf_.clear();
+  }
+  std::uint32_t crc() const { return crc_ ^ 0xFFFFFFFFu; }
+
+private:
+  void feed(std::string_view s) {
+    crc_ = prism::profile::crc32_update(crc_, std::as_bytes(std::span{s.data(), s.size()}));
+    if (out_) out_->write(s.data(), static_cast<std::streamsize>(s.size()));
+  }
+  std::ostream* out_;
+  std::string buf_;
+  std::uint32_t crc_ = 0xFFFFFFFFu;
+};
+
+void write_body(Sink& out, const Index& x) {
+  const auto& c = x.c;
+  for (const auto& t : c.tracks) {
+    for (const auto r : {t.path, t.title, c.artists.ref(t.artist), c.albums.ref(t.album)}) out.ref(r);
+    out.u32(static_cast<std::uint32_t>(t.number));
+  }
+  for (const auto i : x.songs) out.u32(i);
+  for (const auto& a : x.artists) {
+    out.ref(c.artists.ref(a.name));
+    for (const auto v : {a.first, a.count, a.first_album, a.album_count}) out.u32(v);
+  }
+  for (const auto& a : x.albums) {
+    out.ref(c.albums.ref(a.name));
+    out.ref(c.artists.ref(a.artist));
+    out.u32(a.first);
+    out.u32(a.count);
+  }
+  for (const auto i : x.albums_by_name) out.u32(i);
+  out.bytes(c.pool.bytes());
+  out.flush();
+}
+
+std::string header_bytes(const Index& x, std::uint32_t crc) {
   std::string out{magic};
   put32(out, version);
-  put64(out, fingerprint);
-  for (const auto count : {x.entries.size(), x.artists.size(), x.artist_albums.size(),
-                           x.albums.size(), x.pool.bytes.size()})
+  put64(out, x.c.fingerprint);
+  for (const auto count : {x.c.tracks.size(), x.artists.size(), x.albums.size(), x.c.pool.bytes().size()})
     put32(out, static_cast<std::uint32_t>(count));
   put32(out, 0);
+  put32(out, crc);
   return out;
 }
 
-std::string tracks_bytes(const Index& x) {
-  std::string out;
-  for (std::uint32_t i = 0; i < x.entries.size(); ++i) {
-    for (const auto f : {path_field, title_field, artist_field, album_field})
-      put_ref(out, x.pool, i, f);
-    put32(out, static_cast<std::uint32_t>(x.entries[i].row.track));
-  }
-  return out;
-}
-
-std::string perm_bytes(const std::vector<std::uint32_t>& p) {
-  std::string out;
-  for (const auto i : p) put32(out, i);
-  return out;
-}
-
-// `name_of(group)` is the track whose field names the group.
-template <class NameOf>
-std::string groups_bytes(const Index& x, const std::vector<Group>& groups, Field field,
-                         NameOf name_of) {
-  std::string out;
-  for (const auto& g : groups) {
-    put_ref(out, x.pool, name_of(g), field);
-    put32(out, g.first);
-    put32(out, g.count);
-  }
-  return out;
-}
-
-std::string artists_bytes(const Index& x) {
-  std::string out;
-  for (std::size_t a = 0; a < x.artists.size(); ++a) {
-    put_ref(out, x.pool, x.artists[a].first, artist_field);
-    put32(out, x.artists[a].first);
-    put32(out, x.artists[a].count);
-    put32(out, x.albums_per_artist[a].first);
-    put32(out, x.albums_per_artist[a].count);
-  }
-  return out;
-}
-
-bool write_index(std::ostream& out, const Index& x, std::uint64_t fingerprint) {
-  const auto first_track = [](const Group& g) { return g.first; };
-  const auto first_album_song = [&](const Group& g) { return x.album_songs[g.first]; };
-  const auto put = [&](std::string_view section) {
-    out.write(section.data(), static_cast<std::streamsize>(section.size()));
-  };
-  put(header_bytes(x, fingerprint));
-  put(tracks_bytes(x));
-  put(perm_bytes(x.songs));
-  put(perm_bytes(x.album_songs));
-  put(artists_bytes(x));
-  put(groups_bytes(x, x.artist_albums, album_field, first_track));
-  put(groups_bytes(x, x.albums, album_field, first_album_song));
-  put(x.pool.bytes);
+bool write_index(std::ostream& out, const Index& x) {
+  Sink crc_only{nullptr};
+  write_body(crc_only, x);
+  const auto header = header_bytes(x, crc_only.crc());
+  out.write(header.data(), static_cast<std::streamsize>(header.size()));
+  Sink file{&out};
+  write_body(file, x);
   out.flush();
   return out.good();
 }
 
-bool replace_index(Storage& storage, std::string_view root, const Index& x,
-                   std::uint64_t fingerprint) {
+bool replace_index(Storage& storage, std::string_view root, const Index& x) {
   const auto path = join(root, file_name);
   const auto temp = path + ".new";
   auto out = storage.create(temp);
-  if (!out || !write_index(*out, x, fingerprint)) return false;
+  if (!out || !write_index(*out, x)) return false;
   out.reset();
   return storage.rename(temp, path);
 }
@@ -266,15 +315,17 @@ bool replace_index(Storage& storage, std::string_view root, const Index& x,
 }  // namespace
 
 std::uint64_t fingerprint(Storage& storage, std::string_view root) {
-  return fingerprint_of(scan(storage, root));
+  Fingerprint fp;
+  auto on_file = [&](std::string_view path, const DirEntry& e) { fp.add(path, e); };
+  walk(storage, std::string{root}, on_file);
+  return fp.value();
 }
 
 bool Library::build(Storage& storage, std::string_view root,
                     const std::function<bool(int)>& progress) {
-  const auto files = scan(storage, root);
-  auto entries = read_entries(storage, files, progress);
-  if (!entries) return false;
-  return replace_index(storage, root, index_of(*std::move(entries)), fingerprint_of(files));
+  auto collected = scan(storage, root);
+  if (!read_tracks(storage, collected, progress)) return false;
+  return replace_index(storage, root, index_of(std::move(collected)));
 }
 
 }  // namespace player
