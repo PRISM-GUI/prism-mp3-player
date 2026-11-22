@@ -1,4 +1,4 @@
 idf_component_register(
-    SRCS player_main.cpp bt_output.cpp
-    REQUIRES player_core prism korvo1 freertos pthread bt nvs_flash
+    SRCS player_main.cpp bt_output.cpp speaker_output.cpp settings_nvs.cpp
+    REQUIRES player_core prism korvo1 freertos pthread bt nvs_flash esp_codec_dev
 )

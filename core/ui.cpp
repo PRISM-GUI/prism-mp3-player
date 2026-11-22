@@ -119,8 +119,10 @@ void PlayerUi::select_menu_row() {
       break;
     case Screen::Music: open(list({kMusicViews[row]})); break;
     case Screen::Settings:
-      if (row == 0 && !settings.outputs.empty())
+      if (row == 0 && !settings.outputs.empty()) {
         settings.output = (settings.output + 1) % settings.outputs.size();
+        if (output_changed_) output_changed_(settings.output);
+      }
       break;
     case Screen::List:
     case Screen::NowPlaying: break;

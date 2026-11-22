@@ -180,6 +180,29 @@ TEST_CASE("Select on Music then Artists shows the artists") {
   CHECK(texts(ui) == std::vector<std::string>{"Gold", "One", "Two", "Three"});
 }
 
+// Settings → Output cycles the choices and tells the board, which saves them: the running output
+// never changes, so the Settings screen says the choice is for the next start.
+TEST_CASE("cycling the output in Settings tells the board, for the next start") {
+  Six f;
+  PlayerUi ui{f.library.get(), f.player};
+  ui.settings.outputs = {"Bluetooth", "Speaker"};
+  std::size_t told = 99;
+  ui.on_output_changed([&told](std::size_t choice) { told = choice; });
+
+  press(ui, {Rotate{2}, Button::Select});  // Main → Settings, on Output
+  CHECK(ui.screen_title() == "Settings");
+  CHECK(shows(ui, "The output changes at the next start."));
+  CHECK(shows(ui, "Bluetooth"));
+  press(ui, {Button::Select});
+  CHECK(ui.settings.output == 1);
+  CHECK(told == 1);
+  CHECK(shows(ui, "Speaker"));
+  press(ui, {Button::Select});  // back around
+  CHECK(ui.settings.output == 0);
+  CHECK(told == 0);
+  CHECK(shows(ui, "Bluetooth"));
+}
+
 TEST_CASE("Menu goes back") {
   Six f;
   PlayerUi ui{f.library.get(), f.player};

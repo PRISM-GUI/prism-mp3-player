@@ -1,12 +1,15 @@
 // The player on the Korvo-1's 800x480 panel: the 320x240 screen beside a touch click wheel, as
-// on the desktop. The MP3s come from the card in /sdcard/music, indexed on a thread of its own;
-// the sound goes to a Bluetooth headset (bt_output.cpp), decoded on a third thread. The board's
-// MODE button is Menu, VOL+ and VOL- turn the wheel.
+// on the desktop. The MP3s are the card's, from its root down, indexed on a thread of its own; the
+// sound goes to a Bluetooth headset (bt_output.cpp) or the board's own speaker
+// (speaker_output.cpp), whichever the setting read at boot names, and is decoded on a third
+// thread. The board's MODE button is Menu, VOL+ and VOL- turn the wheel.
 
 #include "app_support.hpp"
 #include "band_display.hpp"
 #include "bt_output.hpp"
 #include "buttons.hpp"
+#include "settings_nvs.hpp"
+#include "speaker_output.hpp"
 #include "touch.hpp"
 
 #include "core/dir_storage.hpp"
@@ -37,7 +40,7 @@
 
 namespace {
 
-constexpr std::string_view kMusicRoot = "/music";
+constexpr std::string_view kMusicRoot = "/";  // the card's root: the music is in folders there
 constexpr std::string_view kUpdating = "Updating library…";
 constexpr std::string_view kCannotWrite = "Cannot write the library index";
 constexpr std::string_view kCannotOpen = "Cannot open the library index";
@@ -161,10 +164,33 @@ private:
   std::optional<Handover> handover_;  // guarded by mutex_: written on the builder thread
 };
 
+// The output the boot setting names: a Bluetooth headset, or the board's own speaker. One for the
+// session, built at boot; Settings saves a change for the next start rather than swapping the
+// output under the decoder.
+struct Outputs {
+  Outputs() : choice{player::load_output_choice()} {
+    if (choice == player::OutputChoice::speaker)
+      speaker = std::make_unique<player::SpeakerOutput>();
+    else  // powers the radio up and connects to the bonded headset, or scans
+      radio = &player::BtOutput::open();
+  }
+
+  player::PcmOutput& get() const {
+    return radio ? static_cast<player::PcmOutput&>(*radio) : *speaker;
+  }
+
+  const char* name() const { return radio ? "bluetooth" : "speaker"; }
+  std::string state_text() const { return radio ? radio->state_text() : std::string{"on"}; }
+
+  player::OutputChoice choice;
+  player::BtOutput* radio = nullptr;
+  std::unique_ptr<player::SpeakerOutput> speaker;
+};
+
 struct PlayerModel {
   player::DirStorage storage{BSP_SD_MOUNT_POINT};
-  player::BtOutput& output = player::BtOutput::open();
-  player::Player player{storage, output};
+  Outputs outputs;
+  player::Player player{storage, outputs.get()};
   std::shared_ptr<player::Library> library;
   player::PlayerUi ui{nullptr, player};
   player::WheelWidget wheel{ui};
@@ -268,15 +294,16 @@ const char* state_name(player::Player::Status::State state) {
   return "unknown";
 }
 
-// One line every 5 s, next to the heap's own: what the player and the headset are doing.
+// One line every 5 s, next to the heap's own: what the player and its output are doing.
 void print_status_line(const PlayerModel& model) {
   static std::int64_t last_us = 0;
   const std::int64_t now = esp_timer_get_time();
   if (last_us != 0 && now - last_us < kStatusEveryUs) return;
   last_us = now;
-  std::printf("player: %s bt %s underruns %lu internal free %zu largest %zu\n",
-              state_name(model.player.status().state), model.output.state_text().c_str(),
-              static_cast<unsigned long>(model.output.underruns()),
+  std::printf("player: %s out %s %s underruns %lu internal free %zu largest %zu\n",
+              state_name(model.player.status().state), model.outputs.name(),
+              model.outputs.state_text().c_str(),
+              static_cast<unsigned long>(model.outputs.get().underruns()),
               heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
               heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 }
@@ -302,9 +329,17 @@ extern "C" void app_main() {
 
   static PlayerModel model;
   static RemoteButtons remote;
+  // In OutputChoice order: the index in the list is the stored byte.
+  model.ui.settings.outputs = {"Bluetooth", "Speaker"};
+  model.ui.settings.output = static_cast<std::size_t>(model.outputs.choice);
+  model.ui.on_output_changed([](std::size_t choice) {
+    player::save_output_choice(static_cast<player::OutputChoice>(choice));
+    std::printf("player: output %zu saved for the next start\n", choice);
+  });
   if (!card) model.ui.set_library_status(std::string{kNoCard});
   model.ui.poll_on_tick(false);  // the poll thread does that now
-  model.output.on_remote([](player::Button button) { remote.post(button); });
+  if (auto* radio = model.outputs.radio)
+    radio->on_remote([](player::Button button) { remote.post(button); });
   static auto buttons = open_buttons();
   static auto polling = start_poll_thread(model.player);
   prism::platform::frame_app(*display, input, model, [card](prism::platform::FrameContext& ctx) {
@@ -314,7 +349,9 @@ extern "C" void app_main() {
       if (card) model.loader.pump(model.ui, model.library);
     });
     ctx.on_loop([] { model.ui.tick(); });
-    ctx.on_loop([] { show_bluetooth(model.ui, model.output); });
+    ctx.on_loop([] {
+      if (auto* radio = model.outputs.radio) show_bluetooth(model.ui, *radio);
+    });
     ctx.on_loop([] { print_status_line(model); });
     ctx.on_stats(korvo1::print_stats);
   }, korvo1::pinned_threads());

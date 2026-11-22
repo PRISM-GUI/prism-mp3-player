@@ -207,6 +207,28 @@ TEST_CASE("open without an index returns null") {
   CHECK(Library::open(s, "/music") == nullptr);
 }
 
+// The card's root is the library root, as the board uses it: music in folders at the card's top.
+// The index sits at /.prism-library, and the card's own system folders are never walked.
+TEST_CASE("a card's root works as the library root, and system folders are skipped") {
+  MemoryStorage s;
+  add_song(s, "/System Volume Information/x.mp3", "X", "abba", "Gold", 1);
+  add_song(s, "/SYSTEM VOLUME INFORMATION/u.mp3", "U", "abba", "Gold", 2);
+  add_song(s, "/$RECYCLE.BIN/y.mp3", "Y", "abba", "Gold", 3);
+  add_song(s, "/$Recycle.Bin/v.mp3", "V", "abba", "Gold", 4);
+  add_song(s, "/Album/z.mp3", "Z", "abba", "Gold", 5);
+
+  REQUIRE(Library::build(s, "/", keep_going));
+  const auto lib = Library::open(s, "/");
+  REQUIRE(lib);
+  CHECK(lib->count({View::Songs}) == 1);
+  const auto rows = lib->tracks({View::Songs}, 0, 10);
+  REQUIRE(rows.size() == 1);
+  CHECK(rows[0].path == "/Album/z.mp3");  // one slash where the root meets the folder
+  CHECK(lib->is_current(s, "/"));
+  CHECK(s.open("/.prism-library") != nullptr);
+  CHECK(s.open("//.prism-library") == nullptr);
+}
+
 TEST_CASE("a changed card still opens, and is_current says it changed") {
   MemoryStorage s;
   fill_six(s);

@@ -67,14 +67,22 @@ bool is_mp3(std::string_view name) {
   return name.size() >= 4 && fold_for_sort(name.substr(name.size() - 4)) == ".mp3";
 }
 
+// Folders a card carries for its own use: never music, and sometimes thousands of entries.
+bool is_card_system_dir(std::string_view name) {
+  const auto folded = fold_for_sort(name);
+  return folded == "system volume information" || folded == "$recycle.bin";
+}
+
 // Calls on_file(path, entry) for each .mp3 under dir, in path order. Dot names are skipped: the
-// index itself, and the "._x.mp3" files macOS leaves; so are paths the index could not hold.
+// index itself, and the "._x.mp3" files macOS leaves; so are the card's system folders, and paths
+// the index could not hold.
 template <class OnFile>
 void walk(Storage& storage, const std::string& dir, OnFile& on_file) {
   auto entries = storage.list(dir);
   std::ranges::sort(entries, {}, &DirEntry::name);
   for (const auto& e : entries) {
     if (e.name.starts_with('.')) continue;
+    if (e.is_dir && is_card_system_dir(e.name)) continue;
     const auto path = join(dir, e.name);
     if (e.is_dir) walk(storage, path, on_file);
     else if (is_mp3(e.name) && path.size() <= max_string) on_file(path, e);

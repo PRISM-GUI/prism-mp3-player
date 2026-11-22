@@ -6,8 +6,10 @@
 #include <prism/core/field.hpp>
 #include <prism/input/input_event.hpp>
 
+#include <functional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace prism::app { class ViewBuilder; }
@@ -73,6 +75,11 @@ public:
   // clears it.
   void set_library_status(std::string);
   const std::string& library_status() const { return library_status_; }
+  // Settings → Output cycles `settings.outputs`; `settings.output` is what the next start uses,
+  // never the running output. The board saves it from here.
+  void on_output_changed(std::function<void(std::size_t)> handler) {
+    output_changed_ = std::move(handler);
+  }
 
   void canvas(render::DrawList&, core::Rect, const ui::WidgetNode&);
   void view(app::ViewBuilder&);
@@ -111,6 +118,7 @@ private:
   bool polls_on_tick_ = true;
   std::vector<Place> stack_;
   std::string library_status_;
+  std::function<void(std::size_t)> output_changed_;  // the board's, to save the choice
   Player::Status shown_{};  // what the screen shows of the player, for tick()
 };
 
