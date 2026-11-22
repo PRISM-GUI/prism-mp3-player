@@ -77,6 +77,7 @@ void Player::start_at(std::size_t index) {
     fill_ring();
     return start_output();
   }
+  decoder_.reset();
   state_ = State::Stopped;
 }
 
@@ -103,12 +104,13 @@ std::string Player::open_track(std::size_t index) {
   const auto& path = queue_[index].path;
   auto file = storage_.open(path);
   if (!file) return std::format("Missing {}", path);
-  const auto offset = read_tags(*file, file_name(path)).audio_offset;
+  const auto offset = audio_offset(*file);
   decoder_.emplace(std::move(file), offset);
   first_frame_ = decoder_->next_frame();
   if (first_frame_.empty()) return std::format("Cannot decode {}", file_name(path));
-  if (const auto hz = decoder_->format().sample_rate; !supported_rate(hz))
-    return std::format("Unsupported sample rate {} Hz", hz);
+  const auto hz = decoder_->format().sample_rate;
+  if (!supported_rate(hz)) return std::format("Unsupported sample rate {} Hz", hz);
+  if (!output_.accepts(decoder_->format())) return std::format("Output cannot play {} Hz", hz);
   return {};
 }
 

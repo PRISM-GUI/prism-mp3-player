@@ -3,6 +3,7 @@
 #include "core/memory_storage.hpp"
 #include "core/pcm_ring.hpp"
 #include "core/player.hpp"
+#include "tests/tag_builder.hpp"
 
 #include <doctest.h>
 
@@ -41,8 +42,9 @@ std::vector<std::byte> random_bytes(std::size_t n) {
 
 class FakeOutput final : public PcmOutput {
 public:
+  bool accepts(PcmFormat format) const override { return rates.contains(format.sample_rate); }
   bool start(PcmFormat format, PcmRing& ring) override {
-    if (!rates.contains(format.sample_rate)) return false;
+    if (start_fails || !accepts(format)) return false;
     format_ = format;
     ring_ = &ring;
     queued_at_start = ring.size();
@@ -66,6 +68,7 @@ public:
   PcmFormat format() const { return format_; }
 
   std::set<int> rates{44100, 48000};
+  bool start_fails = false;
   bool is_connected = true;
   float volume = -1;
   int starts = 0;
@@ -103,6 +106,68 @@ void run(Player& p, FakeOutput& out, std::size_t frames = 441, int max_steps = 2
     p.poll();
     out.pull(frames);
   }
+}
+
+// Counts the files open and the bytes read below `limit` in them.
+class WatchedStorage final : public Storage {
+public:
+  explicit WatchedStorage(Storage& inner) : inner_(inner) {}
+  std::vector<DirEntry> list(std::string_view dir) override { return inner_.list(dir); }
+  std::unique_ptr<File> open(std::string_view path) override {
+    auto f = inner_.open(path);
+    return f ? std::make_unique<WatchedFile>(std::move(f), *this) : nullptr;
+  }
+  std::unique_ptr<std::ostream> create(std::string_view path) override { return inner_.create(path); }
+  bool rename(std::string_view from, std::string_view to) override { return inner_.rename(from, to); }
+
+  std::uint64_t limit = 0;
+  std::size_t bytes_below_limit = 0;
+  int open_files = 0;
+
+private:
+  class WatchedFile final : public File {
+  public:
+    WatchedFile(std::unique_ptr<File> inner, WatchedStorage& s) : inner_(std::move(inner)), s_(s) { ++s_.open_files; }
+    ~WatchedFile() override { --s_.open_files; }
+    std::uint64_t size() const override { return inner_->size(); }
+    std::size_t read(std::uint64_t offset, std::span<std::byte> out) override {
+      const auto n = inner_->read(offset, out);
+      if (offset < s_.limit) s_.bytes_below_limit += std::min<std::uint64_t>(n, s_.limit - offset);
+      return n;
+    }
+
+  private:
+    std::unique_ptr<File> inner_;
+    WatchedStorage& s_;
+  };
+  Storage& inner_;
+};
+
+// MPEG-1 Layer III, 128 kbit/s, 44.1 kHz, stereo, no CRC: a 417-byte frame of silence.
+std::vector<std::byte> silent_frame() {
+  std::vector<std::byte> f(417);
+  f[0] = std::byte{0xff};
+  f[1] = std::byte{0xfb};
+  f[2] = std::byte{0x90};
+  return f;
+}
+
+// A first frame carrying `tag` then `fields` at byte `at`, then 20 silent frames.
+std::vector<std::byte> vbr_file(std::size_t at, std::string_view tag, const std::vector<std::byte>& fields) {
+  auto first = silent_frame();
+  std::ranges::copy(testing::bytes_of(tag), first.begin() + static_cast<std::ptrdiff_t>(at));
+  std::ranges::copy(fields, first.begin() + static_cast<std::ptrdiff_t>(at + 4));
+  auto out = first;
+  for (int i = 0; i < 20; ++i) testing::append(out, silent_frame());
+  return out;
+}
+
+double first_frame_duration(std::vector<std::byte> data) {
+  MemoryStorage s;
+  s.add("/vbr.mp3", std::move(data));
+  Mp3Decoder d{s.open("/vbr.mp3"), 0};
+  REQUIRE_FALSE(d.next_frame().empty());
+  return d.duration_s();
 }
 
 struct Fixture {
@@ -296,7 +361,7 @@ TEST_CASE("a track's position counts from its own start when tracks are chained"
 
 TEST_CASE("a refusing output stops with its own message, without walking the queue") {
   Fixture f;
-  f.out.rates.clear();
+  f.out.start_fails = true;
   Player p{f.storage, f.out};
   p.play({row("/44k.mp3"), row("/48k.mp3")}, 0);
   CHECK(p.status().state == State::Stopped);
@@ -389,4 +454,67 @@ TEST_CASE("a player going away stops its output: the ring it reads goes with the
     REQUIRE(f.out.started());
   }
   CHECK_FALSE(f.out.started());
+}
+
+TEST_CASE("starting a track reads the tag's header, not its 500 KB cover") {
+  MemoryStorage memory;
+  const auto tag = testing::id3v2(3, {testing::frame(3, "APIC", testing::apic_payload("image/jpeg", testing::Bytes(500 * 1024, std::byte{1})))});
+  auto data = tag;
+  testing::append(data, load("sine440_44k.mp3"));
+  memory.add("/cover.mp3", std::move(data));
+  WatchedStorage storage{memory};
+  storage.limit = tag.size();
+  FakeOutput out;
+  Player p{storage, out};
+  p.play({row("/cover.mp3")}, 0);
+  CHECK(p.status().state == State::Playing);
+  CHECK(storage.bytes_below_limit < 1024);
+}
+
+TEST_CASE("a track the output cannot play is skipped, as an unsupported one is") {
+  Fixture f;
+  f.out.rates = {44100};
+  Player p{f.storage, f.out};
+  p.play({row("/44k.mp3"), row("/48k.mp3"), row("/44k.mp3")}, 0);
+  std::set<std::size_t> seen;
+  std::set<std::string> messages;
+  for (int i = 0; i < 2000 && p.status().state != State::Stopped; ++i) {
+    seen.insert(p.status().index);
+    if (!p.status().message.empty()) messages.insert(p.status().message);
+    p.poll();
+    f.out.pull(4096);
+  }
+  CHECK(p.status().state == State::Stopped);
+  CHECK(seen == std::set<std::size_t>{0, 2});
+  CHECK(messages == std::set<std::string>{"Output cannot play 48000 Hz"});
+  CHECK(f.out.underruns() == 0);
+}
+
+TEST_CASE("a queue that ends on a bad track leaves no file open") {
+  MemoryStorage memory;
+  memory.add("/junk.mp3", random_bytes(8192));
+  WatchedStorage storage{memory};
+  FakeOutput out;
+  Player p{storage, out};
+  p.play({row("/junk.mp3")}, 0);
+  CHECK(p.status().state == State::Stopped);
+  CHECK(storage.open_files == 0);
+}
+
+TEST_CASE("a Xing header's frame count gives a VBR file's duration") {
+  const auto frames = testing::be32(1000);
+  std::vector<std::byte> fields{std::byte{0}, std::byte{0}, std::byte{0}, std::byte{1}};
+  testing::append(fields, frames);
+  CHECK(first_frame_duration(vbr_file(4 + 32, "Xing", fields)) == doctest::Approx(1000 * 1152 / 44100.0));
+}
+
+TEST_CASE("a VBRI header's frame count gives a VBR file's duration") {
+  std::vector<std::byte> fields(10);  // version, delay, quality, bytes
+  testing::append(fields, testing::be32(1000));
+  CHECK(first_frame_duration(vbr_file(36, "VBRI", fields)) == doctest::Approx(1000 * 1152 / 44100.0));
+}
+
+TEST_CASE("a Xing header without a frame count falls back to the bitrate") {
+  const std::vector<std::byte> no_flags(8);
+  CHECK(first_frame_duration(vbr_file(4 + 32, "Xing", no_flags)) == doctest::Approx(21 * 417 * 8 / 128000.0));
 }

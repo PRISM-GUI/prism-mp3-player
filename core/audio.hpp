@@ -18,6 +18,7 @@ struct PcmFormat {
 class PcmOutput {
 public:
   virtual ~PcmOutput() = default;
+  virtual bool accepts(PcmFormat) const = 0;     // false: the player skips tracks in this format
   virtual bool start(PcmFormat, PcmRing&) = 0;  // false: cannot play this format
   virtual void stop() = 0;                      // after it returns, the ring is no longer read
   virtual bool connected() const = 0;           // false: the headset is gone

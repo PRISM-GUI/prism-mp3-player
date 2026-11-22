@@ -39,6 +39,7 @@ namespace {
 
 class FakeOutput final : public PcmOutput {
 public:
+  bool accepts(PcmFormat) const override { return true; }
   bool start(PcmFormat, PcmRing&) override { return true; }
   void stop() override {}
   bool connected() const override { return true; }

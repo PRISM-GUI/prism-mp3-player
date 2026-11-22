@@ -14,6 +14,7 @@ namespace player {
 // the ring still drains at the playback rate, silently.
 class SdlPcmOutput final : public PcmOutput {
 public:
+  bool accepts(PcmFormat) const override { return true; }  // SDL converts any rate for the card
   bool start(PcmFormat, PcmRing&) override;
   void stop() override;
   bool connected() const override { return true; }

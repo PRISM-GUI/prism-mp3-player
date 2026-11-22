@@ -21,6 +21,7 @@ public:
   std::span<const std::int16_t> next_frame();
   // Valid once a frame was decoded.
   PcmFormat format() const { return {sample_rate_, 2}; }
+  // From a Xing or VBRI header's frame count, else from the first frame's bitrate.
   double duration_s() const;
 
 private:
@@ -36,6 +37,7 @@ private:
   mp3dec_t dec_;
   std::array<std::int16_t, MINIMP3_MAX_SAMPLES_PER_FRAME> pcm_{};
   int sample_rate_ = 0, bitrate_kbps_ = 0;
+  std::uint64_t vbr_samples_ = 0;  // per channel, from the first frame's Xing or VBRI header; 0: none
 };
 
 }  // namespace player
