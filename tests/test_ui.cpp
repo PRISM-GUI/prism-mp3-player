@@ -167,7 +167,7 @@ TEST_CASE("Select on Music then Artists shows the artists") {
   CHECK(shows(ui, "Music"));
   press(ui, {Button::Select});
   CHECK(ui.screen_title() == "Music");
-  press(ui, {Button::Select});
+  press(ui, {Rotate{1}, Button::Select});
   CHECK(ui.screen_title() == "Artists");
   CHECK(shows(ui, "abba"));
   CHECK(shows(ui, "Beta Band"));
@@ -206,26 +206,117 @@ TEST_CASE("cycling the output in Settings tells the board, for the next start") 
 TEST_CASE("Menu goes back") {
   Six f;
   PlayerUi ui{f.library.get(), f.player};
-  press(ui, {Button::Select, Rotate{1}, Button::Select});
+  press(ui, {Button::Select, Rotate{2}, Button::Select});
   CHECK(ui.screen_title() == "Albums");
   press(ui, {Button::Menu});
   CHECK(ui.screen_title() == "Music");
-  CHECK(ui.selected() == 1);  // where it was
+  CHECK(ui.selected() == 2);  // where it was: Folders, Artists, Albums
   press(ui, {Button::Menu});
   CHECK(ui.screen_title() == "Player");
   press(ui, {Button::Menu});
   CHECK(ui.screen_title() == "Player");
 }
 
+// The card as it is: folders first, then its .mp3 files, both sorted the way the library sorts,
+// with the card's own folders and dot names left out — the same rules the library build walks by.
+// A folder row shows its name with a trailing '/', which is also what makes Select enter it.
+TEST_CASE("Folders lists subfolders then mp3 files, sorted, skipping system folders") {
+  MemoryStorage s;
+  s.add("/Album/zeta.mp3", fake_audio(16));
+  s.add("/Album/Beta.mp3", fake_audio(16));
+  s.add("/Album/alpha.mp3", fake_audio(16));
+  s.add("/Album/Sub/deep.mp3", fake_audio(16));
+  s.add("/Album/System Volume Information/junk.mp3", fake_audio(16));
+  s.add("/Album/$RECYCLE.BIN/junk.mp3", fake_audio(16));
+  s.add("/Album/.hidden.mp3", fake_audio(16));
+  s.add("/Album/notes.txt", fake_audio(16));
+  FakeOutput out;
+  Player player{s, out};
+  PlayerUi ui{nullptr, player};
+  ui.set_storage(&s);
+
+  press(ui, {Button::Select, Button::Select});  // Music → Folders, at the card's root
+  CHECK(ui.screen_title() == "Card");
+  CHECK(texts(ui) == std::vector<std::string>{"Card", "Album/"});
+
+  press(ui, {Button::Select});
+  CHECK(ui.screen_title() == "Album");
+  CHECK(texts(ui) == std::vector<std::string>{"Album", "Sub/", "alpha.mp3", "Beta.mp3", "zeta.mp3"});
+}
+
+TEST_CASE("Select enters a folder; Menu goes back and keeps the selection") {
+  MemoryStorage s;
+  s.add("/Album/x.mp3", fake_audio(16));
+  s.add("/Best/y.mp3", fake_audio(16));
+  s.add("/a.mp3", fake_audio(16));
+  FakeOutput out;
+  Player player{s, out};
+  PlayerUi ui{nullptr, player};
+  ui.set_storage(&s);
+
+  press(ui, {Button::Select, Button::Select});  // Music → Folders, at the root
+  REQUIRE(ui.screen_title() == "Card");
+  press(ui, {Rotate{1}, Button::Select});  // Best
+  CHECK(ui.screen_title() == "Best");
+  press(ui, {Button::Menu});
+  CHECK(ui.screen_title() == "Card");
+  CHECK(ui.selected() == 1);  // still on Best
+  CHECK(shows(ui, "Best/"));  // a folder says so with its trailing slash
+  press(ui, {Button::Menu});
+  CHECK(ui.screen_title() == "Music");
+}
+
+TEST_CASE("Select on a file plays its folder from that file") {
+  const auto sine = load("sine440_44k.mp3");
+  MemoryStorage s;
+  add_song(s, "/Album/a.mp3", "A", "Band", "Disc", 1, sine);
+  add_song(s, "/Album/b.mp3", "B", "Band", "Disc", 2, sine);
+  add_song(s, "/Album/c.mp3", "C", "Band", "Disc", 3, sine);
+  add_song(s, "/Album/Sub/d.mp3", "D", "Band", "Disc", 4, sine);
+  FakeOutput out;
+  Player player{s, out};
+  PlayerUi ui{nullptr, player};
+  ui.set_storage(&s);
+
+  press(ui, {Button::Select, Button::Select, Button::Select});  // Music → Folders → Album
+  REQUIRE(ui.screen_title() == "Album");
+  press(ui, {Rotate{2}, Button::Select});  // Sub is the first row, so this is b.mp3
+  CHECK(ui.screen_title() == "Now Playing");
+  CHECK(player.queue_size() == 3U);  // the folder's own files: not Sub/d.mp3
+  CHECK(player.queue().front().title == "A");
+  CHECK(player.queue().back().title == "C");
+  CHECK(player.status().index == 1);
+  CHECK(player.current_track().has_value());
+  CHECK(player.current_track()->title == "B");
+}
+
+TEST_CASE("a folder of 2,000 files queues a window around the selected file") {
+  MemoryStorage s;
+  for (int n = 0; n < 2000; ++n)
+    add_song(s, std::format("/huge/{:04}.mp3", n), std::format("Track {:04}", n), "Band", "Huge", n + 1);
+  FakeOutput out;
+  Player player{s, out};
+  PlayerUi ui{nullptr, player};
+  ui.set_storage(&s);
+
+  press(ui, {Button::Select, Button::Select, Button::Select});  // Music → Folders → huge
+  REQUIRE(ui.screen_title() == "huge");
+  press(ui, {Rotate{1000}, Button::Select});
+  REQUIRE(player.queue_size() == 500);
+  CHECK(player.queue().front().title == "Track 0750");
+  CHECK(player.queue()[250].title == "Track 1000");  // the selected file, in the middle
+  CHECK(player.queue().back().title == "Track 1249");
+}
+
 TEST_CASE("rotate past the end stops at the last row") {
   Six f;
   PlayerUi ui{f.library.get(), f.player};
-  press(ui, {Button::Select, Button::Select, Rotate{5}});
+  press(ui, {Button::Select, Rotate{1}, Button::Select, Rotate{5}});
   CHECK(ui.selected() == 1);
   press(ui, {Rotate{-9}});
   CHECK(ui.selected() == 0);
   press(ui, {Button::Menu, Rotate{7}});
-  CHECK(ui.selected() == 2);
+  CHECK(ui.selected() == 3);  // the last of Folders, Artists, Albums, Songs
 }
 
 TEST_CASE("10,000 songs: 9,999 steps reach the last song and only visible rows were read") {
@@ -235,7 +326,7 @@ TEST_CASE("10,000 songs: 9,999 steps reach the last song and only visible rows w
   FakeOutput out;
   Player player{storage, out};
   PlayerUi ui{library.get(), player};
-  press(ui, {Button::Select, Rotate{2}, Button::Select});
+  press(ui, {Button::Select, Rotate{3}, Button::Select});
   REQUIRE(ui.screen_title() == "Songs");
 
   storage.bytes_read = 0;
@@ -254,7 +345,7 @@ TEST_CASE("10,000 songs: 9,999 steps reach the last song and only visible rows w
 TEST_CASE("Select on a song plays the album from that song") {
   Six f;
   PlayerUi ui{f.library.get(), f.player};
-  press(ui, {Button::Select, Rotate{1}, Button::Select, Rotate{1}, Button::Select});
+  press(ui, {Button::Select, Rotate{2}, Button::Select, Rotate{1}, Button::Select});
   REQUIRE(ui.screen_title() == "Gold");
   f.storage.opened.clear();
   press(ui, {Rotate{1}, Button::Select});
@@ -269,7 +360,7 @@ TEST_CASE("Select in Songs queues 500 songs, up to 250 of them before the select
   FakeOutput out;
   Player player{storage, out};
   PlayerUi ui{library.get(), player};
-  press(ui, {Button::Select, Rotate{2}, Button::Select, Rotate{100}});
+  press(ui, {Button::Select, Rotate{3}, Button::Select, Rotate{100}});
   storage.opened.clear();
   press(ui, {Button::Select});
   // The fake audio does not decode: the player tries the selected song and each one after it.
@@ -289,7 +380,7 @@ TEST_CASE("Select in a 2,000-song album queues 500 songs around the selected one
   FakeOutput out;
   Player player{memory, out};
   PlayerUi ui{library.get(), player};
-  press(ui, {Button::Select, Rotate{1}, Button::Select, Button::Select, Rotate{1000}});
+  press(ui, {Button::Select, Rotate{2}, Button::Select, Button::Select, Rotate{1000}});
   REQUIRE(ui.screen_title() == "Huge");
   press(ui, {Button::Select});
   REQUIRE(player.queue().size() == 500);
@@ -309,7 +400,7 @@ TEST_CASE("Previous from the 5th song of a 12-song album plays the 4th") {
   FakeOutput out;
   Player player{memory, out};
   PlayerUi ui{library.get(), player};
-  press(ui, {Button::Select, Rotate{1}, Button::Select, Button::Select, Rotate{4}, Button::Select});
+  press(ui, {Button::Select, Rotate{2}, Button::Select, Button::Select, Rotate{4}, Button::Select});
   REQUIRE(ui.screen_title() == "Now Playing");
   REQUIRE(player.queue()[player.status().index].title == "Track 05");
   press(ui, {Button::Previous});
@@ -364,7 +455,7 @@ TEST_CASE("while a stale library is rebuilt, its screens stay browsable and say 
   press(ui, {Button::Select});
   CHECK(shows(ui, "Updating library…"));
   CHECK(shows(ui, "Artists"));
-  press(ui, {Button::Select});
+  press(ui, {Rotate{1}, Button::Select});
   CHECK(ui.screen_title() == "Artists");
   CHECK(shows(ui, "Updating library…"));
   CHECK(shows(ui, "abba"));
@@ -380,7 +471,7 @@ TEST_CASE("while a stale library is rebuilt, its screens stay browsable and say 
 TEST_CASE("a new library leaves its lists for Main") {
   Six f;
   PlayerUi ui{f.library.get(), f.player};
-  press(ui, {Button::Select, Button::Select});
+  press(ui, {Button::Select, Rotate{1}, Button::Select});
   REQUIRE(ui.screen_title() == "Artists");
   ui.set_library(nullptr);
   CHECK(ui.screen_title() == "Player");
@@ -402,7 +493,7 @@ TEST_CASE("in Now Playing, the wheel sets the volume by 5% a step") {
 TEST_CASE("drawing a list highlights the selected row") {
   Six f;
   PlayerUi ui{f.library.get(), f.player};
-  press(ui, {Button::Select, Button::Select, Rotate{1}});
+  press(ui, {Button::Select, Rotate{1}, Button::Select, Rotate{1}});
   REQUIRE(ui.selected() == 1);
 
   constexpr int W = 320, H = 240;
@@ -453,7 +544,7 @@ TEST_CASE("the title bar has a battery left of the play state") {
 TEST_CASE("the Albums view shows each album's artist") {
   Six f;
   PlayerUi ui{f.library.get(), f.player};
-  press(ui, {Button::Select, Rotate{1}, Button::Select});
+  press(ui, {Button::Select, Rotate{2}, Button::Select});
   REQUIRE(ui.screen_title() == "Albums");
   CHECK(shows(ui, "abba"));
   CHECK(shows(ui, "Beta Band"));
@@ -476,7 +567,7 @@ TEST_CASE("a very long title is cut before the battery") {
   FakeOutput out;
   Player player{s, out};
   PlayerUi ui{library.get(), player};
-  press(ui, {Button::Select, Rotate{1}, Button::Select, Button::Select});
+  press(ui, {Button::Select, Rotate{2}, Button::Select, Button::Select});
   REQUIRE(ui.screen_title() == album);
   const auto dl = drawn(ui);
   const auto [title, clip] = text_and_clip(dl, album);
@@ -493,7 +584,7 @@ TEST_CASE("the remaining time ends at the progress bar's right edge") {
   FakeOutput out;
   Player player{s, out};
   PlayerUi ui{library.get(), player};
-  press(ui, {Button::Select, Rotate{2}, Button::Select, Button::Select});
+  press(ui, {Button::Select, Rotate{3}, Button::Select, Button::Select});
   REQUIRE(ui.screen_title() == "Now Playing");
   REQUIRE(player.status().state == Player::Status::State::Playing);
   const auto dl = drawn(ui);
@@ -506,7 +597,7 @@ TEST_CASE("the remaining time ends at the progress bar's right edge") {
 TEST_CASE("Now Playing with a stopped player says Nothing playing and why") {
   Six f;
   PlayerUi ui{f.library.get(), f.player};
-  press(ui, {Button::Select, Rotate{1}, Button::Select, Button::Select});
+  press(ui, {Button::Select, Rotate{2}, Button::Select, Button::Select});
   REQUIRE(ui.screen_title() == "Alpha");
   press(ui, {Button::Select});
   REQUIRE(ui.screen_title() == "Now Playing");

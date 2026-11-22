@@ -150,7 +150,8 @@ void PlayerUi::canvas(render::DrawList& dl, core::Rect bounds, const ui::WidgetN
   dl.filled_rect(rect(0, 0, pen.width, bounds.extent.h.raw()), kWhite);
   draw_title(pen);
   switch (here().screen) {
-    case Screen::List: draw_list(pen); break;
+    case Screen::List:
+    case Screen::Folders: draw_list(pen); break;
     case Screen::NowPlaying: draw_now_playing(pen); break;
     default: draw_menu(pen); break;
   }
@@ -177,13 +178,14 @@ void PlayerUi::draw_title(const Pen& pen) const {
 
 void PlayerUi::draw_menu(const Pen& pen) const {
   const auto& p = here();
-  if (p.screen == Screen::Music && !has_music()) return centred_note(pen, 110, library_status_.empty() ? "No music" : library_status_);
   const auto rows = menu_rows(p.screen);
+  if (rows.empty()) return centred_note(pen, 110, library_status_.empty() ? "No music" : library_status_);
   const bool opens = p.screen != Screen::Settings;
   for (std::size_t i = p.top; i < std::min(rows.size(), p.top + kVisibleRows); ++i) {
     Row row{rows[i], {}};
     if (p.screen == Screen::Settings)
       row.value = i == 0 ? (settings.outputs.empty() ? "" : settings.outputs[settings.output]) : settings.bluetooth;
+    if (p.screen == Screen::Music && i == 0 && !storage_) row.value = "No SD card";
     draw_row(pen, pen.width, i - p.top, i == p.selected, row, opens);
   }
   if (p.screen == Screen::Settings)
@@ -194,6 +196,12 @@ void PlayerUi::draw_menu(const Pen& pen) const {
 // its value: two artists' albums of the same name stay apart.
 std::vector<PlayerUi::Row> PlayerUi::visible_rows() const {
   const auto& p = here();
+  if (p.screen == Screen::Folders) {
+    const auto top = std::min(p.top, p.rows.size());
+    const auto end = std::min(top + kVisibleRows, p.rows.size());
+    return {p.rows.begin() + static_cast<std::ptrdiff_t>(top),
+            p.rows.begin() + static_cast<std::ptrdiff_t>(end)};
+  }
   std::vector<Row> rows;
   if (is_song_view(p.key.view)) {
     for (auto& t : library_->tracks(p.key, p.top, kVisibleRows)) rows.push_back({std::move(t.title), {}});
@@ -210,7 +218,7 @@ std::vector<PlayerUi::Row> PlayerUi::visible_rows() const {
 
 void PlayerUi::draw_list(const Pen& pen) const {
   const auto& p = here();
-  const bool opens = !is_song_view(p.key.view);
+  const bool opens = p.screen == Screen::List && !is_song_view(p.key.view);
   const auto rows = visible_rows();
   for (std::size_t i = 0; i < rows.size(); ++i) draw_row(pen, pen.width - 6, i, p.top + i == p.selected, rows[i], opens);
 }

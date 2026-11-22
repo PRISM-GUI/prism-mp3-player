@@ -16,6 +16,18 @@
 #include <tuple>
 
 namespace player {
+
+// True for a .mp3 name, whatever the case of its extension.
+bool is_mp3_name(std::string_view name) {
+  return name.size() >= 4 && fold_for_sort(name.substr(name.size() - 4)) == ".mp3";
+}
+
+// Folders a card carries for its own use: never music, and sometimes thousands of entries.
+bool is_card_system_dir(std::string_view name) {
+  const auto folded = fold_for_sort(name);
+  return folded == "system volume information" || folded == "$recycle.bin";
+}
+
 namespace {
 
 using namespace index_format;
@@ -63,16 +75,6 @@ private:
   std::vector<StrRef> refs_;
 };
 
-bool is_mp3(std::string_view name) {
-  return name.size() >= 4 && fold_for_sort(name.substr(name.size() - 4)) == ".mp3";
-}
-
-// Folders a card carries for its own use: never music, and sometimes thousands of entries.
-bool is_card_system_dir(std::string_view name) {
-  const auto folded = fold_for_sort(name);
-  return folded == "system volume information" || folded == "$recycle.bin";
-}
-
 // Calls on_file(path, entry) for each .mp3 under dir, in path order. Dot names are skipped: the
 // index itself, and the "._x.mp3" files macOS leaves; so are the card's system folders, and paths
 // the index could not hold.
@@ -85,7 +87,7 @@ void walk(Storage& storage, const std::string& dir, OnFile& on_file) {
     if (e.is_dir && is_card_system_dir(e.name)) continue;
     const auto path = join(dir, e.name);
     if (e.is_dir) walk(storage, path, on_file);
-    else if (is_mp3(e.name) && path.size() <= max_string) on_file(path, e);
+    else if (is_mp3_name(e.name) && path.size() <= max_string) on_file(path, e);
   }
 }
 

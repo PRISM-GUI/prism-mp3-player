@@ -337,6 +337,7 @@ extern "C" void app_main() {
     std::printf("player: output %zu saved for the next start\n", choice);
   });
   if (!card) model.ui.set_library_status(std::string{kNoCard});
+  else model.ui.set_storage(&model.storage);  // Folders browses the card with or without an index
   model.ui.poll_on_tick(false);  // the poll thread does that now
   if (auto* radio = model.outputs.radio)
     radio->on_remote([](player::Button button) { remote.post(button); });

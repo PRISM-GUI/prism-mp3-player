@@ -42,7 +42,11 @@ public:
     std::string bluetooth = "Not available";
   };
 
-  enum class Screen { Main, Music, List, NowPlaying, Settings };
+  enum class Screen { Main, Music, List, NowPlaying, Settings, Folders };
+  // A list row: its label, and a value shown right-aligned (a setting's, an album's artist).
+  struct Row {
+    std::string label, value;
+  };
   // A screen on the stack, with its own selection so Menu comes back to where it was.
   struct Place {
     Screen screen;
@@ -50,11 +54,11 @@ public:
     std::size_t count = 0;       // its rows
     std::size_t selected = 0;
     std::size_t top = 0;  // the first visible row
-  };
-
-  // A list row: its label, and a value shown right-aligned (a setting's, an album's artist).
-  struct Row {
-    std::string label, value;
+    // Folders: the directory on screen, and its entries read once when it opened. Subfolders come
+    // first with a trailing '/', then the .mp3 files. Initialised here too: every Place is built as
+    // an aggregate, and -Wmissing-field-initializers wants each member either set or defaulted.
+    std::string dir{};
+    std::vector<Row> rows{};
   };
   struct Pen;  // where a screen draws (ui_draw.cpp)
 
@@ -70,6 +74,9 @@ public:
   // A rebuilt library replaces the old one: its lists leave the stack (to Main when one is on
   // screen).
   void set_library(Library*);
+  // The card, for the Folders browser: it lists a folder straight from storage, so it works while
+  // the library is missing or rebuilding. Null: the Folders row says "No SD card".
+  void set_storage(Storage*);
   // What a library is doing ("Updating library…"): the Music screen says it in place of No
   // music, and with a library, the title bar of the library screens says it. set_library()
   // clears it.
@@ -106,6 +113,12 @@ private:
   void select_list_row();
   void play_from(std::size_t row);
 
+  void select_folders();
+  void select_folder_row();
+  void open_folder(std::string_view dir);
+  void play_folder(std::string_view dir, std::size_t row);
+  std::vector<Row> read_folder(std::string_view dir) const;
+
   void draw_title(const Pen&) const;
   void draw_menu(const Pen&) const;
   void draw_list(const Pen&) const;
@@ -113,6 +126,7 @@ private:
   std::vector<Row> visible_rows() const;
 
   Library* library_;
+  Storage* storage_ = nullptr;  // the card, for Folders; not the same as the library
   Player& player_;
   int volume_ = kVolumeSteps / 2;
   bool polls_on_tick_ = true;

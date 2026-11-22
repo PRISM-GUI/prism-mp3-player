@@ -1,5 +1,9 @@
 #include "core/ui.hpp"
 
+#include "core/fold.hpp"
+#include "core/index_format.hpp"
+#include "core/tags.hpp"
+
 #include <algorithm>
 #include <array>
 #include <utility>
@@ -37,9 +41,18 @@ std::string_view screen_name(Screen s) {
     case Screen::Music: return "Music";
     case Screen::NowPlaying: return "Now Playing";
     case Screen::Settings: return "Settings";
-    case Screen::List: break;
+    case Screen::List:
+    case Screen::Folders: break;
   }
   return {};
+}
+
+// The title bar of a Folders screen: the folder's own name, and "Card" for the card's root.
+std::string_view folder_name(std::string_view dir) {
+  while (dir.size() > 1 && dir.ends_with('/')) dir.remove_suffix(1);
+  if (dir == "/") return "Card";
+  const auto slash = dir.rfind('/');
+  return slash == std::string_view::npos ? dir : dir.substr(slash + 1);
 }
 
 // Keeps `selected` in [0, count) and on screen.
@@ -61,12 +74,18 @@ PlayerUi::PlayerUi(Library* library, Player& player) : library_(library), player
 std::vector<std::string> PlayerUi::menu_rows(Screen s) const {
   switch (s) {
     case Screen::Main: return {"Music", "Now Playing", "Settings"};
-    case Screen::Music:
-      if (!has_music()) return {};
-      return {"Artists", "Albums", "Songs"};
+    case Screen::Music: {
+      // Folders works from the storage alone, so it is there while the library is missing or
+      // rebuilding; the library's views only when it has songs.
+      if (!has_music() && !storage_) return {};
+      std::vector<std::string> rows{"Folders"};
+      if (has_music()) rows.insert(rows.end(), {"Artists", "Albums", "Songs"});
+      return rows;
+    }
     case Screen::Settings: return {"Output", "Bluetooth"};
     case Screen::List:
-    case Screen::NowPlaying: break;
+    case Screen::NowPlaying:
+    case Screen::Folders: break;
   }
   return {};
 }
@@ -79,7 +98,9 @@ PlayerUi::Place PlayerUi::list(ViewKey key) const {
 }
 
 std::string_view PlayerUi::screen_title() const {
-  return here().screen == Screen::List ? list_title(here().key) : screen_name(here().screen);
+  const auto& p = here();
+  if (p.screen == Screen::Folders) return folder_name(p.dir);
+  return p.screen == Screen::List ? list_title(p.key) : screen_name(p.screen);
 }
 
 void PlayerUi::handle(WheelEvent e) {
@@ -108,6 +129,7 @@ void PlayerUi::rotate(int steps) {
 void PlayerUi::select() {
   if (here().count == 0) return;
   if (here().screen == Screen::List) return select_list_row();
+  if (here().screen == Screen::Folders) return select_folder_row();
   select_menu_row();
 }
 
@@ -117,7 +139,10 @@ void PlayerUi::select_menu_row() {
     case Screen::Main:
       open(row == 0 ? menu(Screen::Music) : row == 1 ? menu(Screen::NowPlaying) : menu(Screen::Settings));
       break;
-    case Screen::Music: open(list({kMusicViews[row]})); break;
+    case Screen::Music:
+      if (row == 0) return select_folders();
+      open(list({kMusicViews[row - 1]}));
+      break;
     case Screen::Settings:
       if (row == 0 && !settings.outputs.empty()) {
         settings.output = (settings.output + 1) % settings.outputs.size();
@@ -125,7 +150,8 @@ void PlayerUi::select_menu_row() {
       }
       break;
     case Screen::List:
-    case Screen::NowPlaying: break;
+    case Screen::NowPlaying:
+    case Screen::Folders: break;
   }
 }
 
@@ -147,6 +173,77 @@ void PlayerUi::play_from(std::size_t row) {
   auto queue = library_->tracks(here().key, first, kSongsQueue);
   if (row - first >= queue.size()) return;
   player_.play(std::move(queue), row - first);
+  open(menu(Screen::NowPlaying));
+}
+
+// The card's root, or nothing when there is no card: the Folders row says why.
+void PlayerUi::select_folders() {
+  if (storage_) open_folder("/");
+}
+
+void PlayerUi::select_folder_row() {
+  const auto& place = here();
+  if (place.selected >= place.rows.size()) return;
+  const auto& label = place.rows[place.selected].label;
+  if (!label.ends_with('/')) return play_folder(place.dir, place.selected);
+  open_folder(index_format::join(place.dir, std::string_view{label}.substr(0, label.size() - 1)));
+}
+
+// Lists the folder once, when it is entered: subfolders first with a trailing '/', then its .mp3
+// files, each group by the library's own order, and by the library's own rules about what counts.
+void PlayerUi::open_folder(std::string_view dir) {
+  Place place{.screen = Screen::Folders, .dir = std::string{dir}};
+  place.rows = read_folder(dir);
+  place.count = place.rows.size();
+  open(std::move(place));
+}
+
+std::vector<PlayerUi::Row> PlayerUi::read_folder(std::string_view dir) const {
+  struct Entry {
+    std::string name;
+    bool is_dir;
+  };
+  std::vector<Entry> entries;
+  for (const auto& e : storage_->list(dir)) {
+    if (e.name.starts_with('.')) continue;
+    if (e.is_dir && is_card_system_dir(e.name)) continue;
+    if (!e.is_dir && !is_mp3_name(e.name)) continue;
+    entries.push_back({e.is_dir ? e.name + "/" : e.name, e.is_dir});
+  }
+  std::ranges::sort(entries, [](const Entry& a, const Entry& b) {
+    if (a.is_dir != b.is_dir) return a.is_dir;
+    return fold_for_sort(a.name) < fold_for_sort(b.name);
+  });
+  std::vector<Row> rows;
+  rows.reserve(entries.size());
+  for (auto& e : entries) rows.push_back({std::move(e.name), {}});
+  return rows;
+}
+
+// Plays the folder's own .mp3 files from `row`, by the window rule a song view uses. A subfolder is
+// never in the queue.
+void PlayerUi::play_folder(std::string_view dir, std::size_t row) {
+  const auto& place = here();
+  std::vector<std::string> paths;
+  std::size_t first_file = 0;
+  for (std::size_t i = 0; i < place.rows.size(); ++i) {
+    if (place.rows[i].label.ends_with('/')) continue;
+    if (i == row) first_file = paths.size();
+    paths.push_back(index_format::join(dir, place.rows[i].label));
+  }
+  if (paths.empty()) return;
+  const bool whole_folder = paths.size() <= kSongsQueue;
+  const auto first = whole_folder ? 0 : first_file - std::min(first_file, kSongsBefore);
+  const auto last = whole_folder ? paths.size() : std::min(first + kSongsQueue, paths.size());
+  std::vector<TrackRow> queue;
+  for (auto i = first; i < last; ++i) {
+    auto file = storage_->open(paths[i]);
+    if (!file) continue;
+    const auto tags = read_tags(*file, paths[i]);
+    queue.push_back({paths[i], tags.title, tags.artist, tags.album, tags.track});
+  }
+  if (first_file < first || first_file - first >= queue.size()) return;
+  player_.play(std::move(queue), first_file - first);
   open(menu(Screen::NowPlaying));
 }
 
@@ -173,6 +270,17 @@ void PlayerUi::set_library(Library* library) {
 
 void PlayerUi::set_library_status(std::string status) {
   library_status_ = std::move(status);
+  changed();
+}
+
+// The card changed under the browser: drop what was read from it and re-count the Music menu's
+// rows. In practice this runs once, at boot, before anything is on the stack but Main.
+void PlayerUi::set_storage(Storage* storage) {
+  if (storage_ == storage) return;
+  storage_ = storage;
+  std::erase_if(stack_, [](const Place& p) { return p.screen == Screen::Folders; });
+  for (auto& p : stack_)
+    if (p.screen == Screen::Music) p = menu(Screen::Music);
   changed();
 }
 

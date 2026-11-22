@@ -72,4 +72,9 @@ private:
 // Over the paths, sizes and mtimes of the .mp3 files under root.
 std::uint64_t fingerprint(Storage&, std::string_view root);
 
+// What a scan of the card takes for music, and what it walks past: the folder browser lists by the
+// same rules, so they live here rather than twice.
+bool is_mp3_name(std::string_view name);
+bool is_card_system_dir(std::string_view name);
+
 }  // namespace player

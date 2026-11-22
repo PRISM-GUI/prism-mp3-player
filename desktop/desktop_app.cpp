@@ -61,6 +61,7 @@ void DesktopApp::view(prism::app::ViewBuilder& vb) {
 // the Library got when it opened, never its file, so the builder may call it while the logic
 // thread reads rows.
 void DesktopApp::load_library(prism::app::AppContext& ctx) {
+  ui.set_storage(&storage);  // Folders reads the disk itself, index or no index
   library = Library::open(storage, kMusicRoot);
   ui.set_library(library.get());
   if (!library) ui.set_library_status(std::string{kUpdating});  // at once: no "No music" before the builder says

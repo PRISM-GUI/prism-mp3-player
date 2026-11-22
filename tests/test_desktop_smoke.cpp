@@ -55,7 +55,8 @@ TEST_CASE("the desktop model runs 60 frames headless on a generated library") {
     ctx.clock().add([&](auto) {
       ++frames;
       if (!sent && app.library) {  // built on the background thread
-        press(app, {keys::enter, keys::down, keys::down, keys::enter, keys::enter});
+        // Music's rows are Folders, Artists, Albums, Songs: three downs reach Songs.
+        press(app, {keys::enter, keys::down, keys::down, keys::down, keys::enter, keys::enter});
         sent = true;
       }
       seen = app.player.status().state;
