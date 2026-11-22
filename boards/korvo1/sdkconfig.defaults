@@ -1,0 +1,57 @@
+# The ESP32-S31-Korvo-1: 16 MB flash, 16 MB PSRAM (WROOM-3 module). Taken from prism-esp32's
+# sdkconfig.defaults (the panel apps) and sdkconfig.btspike (Bluetooth audio next to the panel).
+CONFIG_IDF_TARGET="esp32s31"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPIRAM=y
+# prism-esp32's partition table: a 3 MB app.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../subprojects/prism-esp32/partitions.csv"
+
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_320=y
+CONFIG_FREERTOS_HZ=1000
+
+# PRISM is compiled as on every other target: exceptions on, and RTTI (std::any::type()).
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+CONFIG_COMPILER_CXX_RTTI=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+CONFIG_ESP_CONSOLE_UART_CUSTOM=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=921600
+
+# app_main builds a whole snapshot of the view.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=16384
+
+# The timing line's idle-task run time (see prism-esp32's sdkconfig.defaults).
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_RUN_TIME_COUNTER_TYPE_U64=y
+CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
+CONFIG_HEAP_USE_HOOKS=y
+
+# CONFIG_BSP_ERROR_CHECK is not set
+
+CONFIG_PRISM_LCD_PCLK_MHZ=18
+CONFIG_BSP_LCD_RGB_REFRESH_AUTO=y
+# CONFIG_BSP_LCD_RGB_BOUNCE_BUFFER_MODE is not set
+CONFIG_BSP_LCD_RGB_BOUNCE_BUFFER_HEIGHT=10
+
+# Internal RAM is for Bluetooth and the display bands: .bss, every allocation over 256 bytes and
+# the logic thread's stack (korvo1::pinned_threads) go to PSRAM, and the bands are 16 rows.
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+CONFIG_PRISM_BAND_HEIGHT=16
+CONFIG_PRISM_UI_SCALE_PERCENT=150
+
+# Bluetooth Classic audio only, as ESP-IDF's classic_bt/a2dp_source example.
+CONFIG_BT_ENABLED=y
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=n
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
+CONFIG_BTDM_CTRL_MODE_BTDM=n
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=y
+CONFIG_BT_A2DP_ENABLE=y
+CONFIG_BT_AVRCP_ENABLED=y
+CONFIG_BT_BLE_ENABLED=n
+# Bluedroid's allocations go to PSRAM first: internal RAM is what the panel runtime needs.
+CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y

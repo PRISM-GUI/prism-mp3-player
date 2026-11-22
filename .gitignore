@@ -1,3 +1,6 @@
 .superpowers/
 builddir*/
 subprojects/*/
+build/
+build-local/
+boards/korvo1/managed_components/

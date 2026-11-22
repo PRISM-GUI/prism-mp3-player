@@ -1,0 +1,3 @@
+[submodule "prism-esp32"]
+	path = subprojects/prism-esp32
+	url = https://github.com/PRISM-GUI/prism-esp32.git
