@@ -75,4 +75,10 @@ std::unique_ptr<std::ostream> DirStorage::create(std::string_view path) {
   return out;
 }
 
+bool DirStorage::rename(std::string_view from, std::string_view to) {
+  std::error_code ec;
+  std::filesystem::rename(resolve(from), resolve(to), ec);
+  return !ec;
+}
+
 }  // namespace player

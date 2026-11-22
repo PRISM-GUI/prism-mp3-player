@@ -12,10 +12,11 @@ public:
   std::vector<DirEntry> list(std::string_view dir) override;
   std::unique_ptr<File> open(std::string_view path) override;
   std::unique_ptr<std::ostream> create(std::string_view path) override;
+  bool rename(std::string_view from, std::string_view to) override;
 
 private:
   struct Entry {
-    std::vector<std::byte> data;
+    std::shared_ptr<const std::vector<std::byte>> data;
     std::int64_t mtime;
   };
   std::map<std::string, Entry, std::less<>> files_;

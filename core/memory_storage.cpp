@@ -11,17 +11,19 @@ namespace {
 
 class MemoryFile final : public File {
 public:
-  explicit MemoryFile(std::vector<std::byte> data) : data_(std::move(data)) {}
-  std::uint64_t size() const override { return data_.size(); }
+  explicit MemoryFile(std::shared_ptr<const std::vector<std::byte>> data)
+      : data_(std::move(data)) {}
+  std::uint64_t size() const override { return data_->size(); }
   std::size_t read(std::uint64_t offset, std::span<std::byte> out) override {
-    if (offset >= data_.size()) return 0;
-    const auto n = std::min<std::size_t>(out.size(), data_.size() - offset);
-    std::copy_n(data_.begin() + static_cast<std::ptrdiff_t>(offset), n, out.begin());
+    if (offset >= data_->size()) return 0;
+    const auto n = std::min<std::size_t>(out.size(), data_->size() - offset);
+    std::copy_n(data_->begin() + static_cast<std::ptrdiff_t>(offset), n, out.begin());
     return n;
   }
 
 private:
-  std::vector<std::byte> data_;
+  // Shared, not copied: an open file is a snapshot, as add() replaces the pointer, never the bytes.
+  std::shared_ptr<const std::vector<std::byte>> data_;
 };
 
 class CommitOnClose final : public std::ostringstream {
@@ -47,7 +49,9 @@ std::string dir_prefix(std::string_view dir) {
 }  // namespace
 
 void MemoryStorage::add(std::string path, std::vector<std::byte> data, std::int64_t mtime) {
-  files_.insert_or_assign(std::move(path), Entry{std::move(data), mtime});
+  files_.insert_or_assign(
+      std::move(path),
+      Entry{std::make_shared<const std::vector<std::byte>>(std::move(data)), mtime});
 }
 
 std::vector<DirEntry> MemoryStorage::list(std::string_view dir) {
@@ -59,7 +63,7 @@ std::vector<DirEntry> MemoryStorage::list(std::string_view dir) {
     const auto rest = std::string_view{it->first}.substr(prefix.size());
     const auto slash = rest.find('/');
     if (slash == std::string_view::npos)
-      out.push_back({std::string{rest}, false, it->second.data.size(), it->second.mtime});
+      out.push_back({std::string{rest}, false, it->second.data->size(), it->second.mtime});
     else if (seen_dirs.emplace(rest.substr(0, slash)).second)
       out.push_back({std::string{rest.substr(0, slash)}, true, 0, 0});
   }
@@ -75,6 +79,15 @@ std::unique_ptr<File> MemoryStorage::open(std::string_view path) {
 std::unique_ptr<std::ostream> MemoryStorage::create(std::string_view path) {
   return std::make_unique<CommitOnClose>(
       [this, p = std::string{path}](std::string content) { add(p, to_bytes(content)); });
+}
+
+bool MemoryStorage::rename(std::string_view from, std::string_view to) {
+  const auto it = files_.find(from);
+  if (it == files_.end()) return false;
+  auto entry = std::move(it->second);
+  files_.erase(it);
+  files_.insert_or_assign(std::string{to}, std::move(entry));
+  return true;
 }
 
 }  // namespace player

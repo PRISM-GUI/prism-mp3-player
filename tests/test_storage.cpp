@@ -66,6 +66,19 @@ void check_create_then_open(Storage& s) {
   CHECK(out[1] == std::byte{'e'});
 }
 
+void check_rename(Storage& s) {
+  { *s.create("/music/a.tmp") << "new"; }
+  { *s.create("/music/a.idx") << "old"; }
+  CHECK(s.rename("/music/a.tmp", "/music/a.idx"));
+  CHECK(s.open("/music/a.tmp") == nullptr);
+  auto f = s.open("/music/a.idx");
+  REQUIRE(f);
+  std::vector<std::byte> out(8);
+  CHECK(f->read(0, out) == 3);
+  CHECK(out[0] == std::byte{'n'});
+  CHECK_FALSE(s.rename("/music/missing", "/music/b"));
+}
+
 void fill(MemoryStorage& s) {
   s.add("/music/a.mp3", bytes(5));
   s.add("/music/x/b.mp3", bytes(3));
@@ -126,4 +139,15 @@ TEST_CASE("DirStorage skips entries it cannot stat, such as a FIFO") {
   CHECK_NOTHROW(es = s.list("/music"));
   CHECK(find(es, "a.mp3"));
   CHECK_FALSE(find(es, "pipe"));
+}
+
+TEST_CASE("rename replaces the target, in memory") {
+  MemoryStorage s;
+  check_rename(s);
+}
+
+TEST_CASE("rename replaces the target, on disk") {
+  TempDir d;
+  DirStorage s{d.path};
+  check_rename(s);
 }
