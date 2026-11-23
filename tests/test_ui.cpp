@@ -848,7 +848,7 @@ struct Scrubber {
     press(ui, {Rotate{1}, Button::Select});
   }
 
-  double position() const { return player.status().position_s; }
+  double position() const { return player.status().position.count(); }
 };
 
 }  // namespace
@@ -859,8 +859,8 @@ TEST_CASE("Select in Now Playing enters scrub mode: the wheel seeks 5 s a step i
   const auto volume = s.out.volume;
   press(s.ui, {Button::Select});  // scrub mode on
   press(s.ui, {Rotate{1}});       // one step forward: 5 s into a 20 s track
-  CHECK(s.position() > PlayerUi::kScrubStep - 0.5);
-  CHECK(s.position() < PlayerUi::kScrubStep + 0.5);
+  CHECK(s.position() > PlayerUi::kScrubStep.count() - 0.5);
+  CHECK(s.position() < PlayerUi::kScrubStep.count() + 0.5);
   CHECK(s.out.volume == volume);  // and the wheel did not touch the volume
   press(s.ui, {Rotate{-1}});      // one step back, to the start
   CHECK(s.position() < 0.5);
@@ -871,7 +871,7 @@ TEST_CASE("Menu leaves scrub mode and stays in Now Playing") {
   const auto volume = s.out.volume;
   press(s.ui, {Button::Select});  // scrub mode on
   press(s.ui, {Rotate{1}});       // seeks
-  CHECK(s.position() > PlayerUi::kScrubStep - 0.5);
+  CHECK(s.position() > PlayerUi::kScrubStep.count() - 0.5);
   press(s.ui, {Button::Menu});  // leaves scrub mode, not the screen
   CHECK(s.ui.screen_title() == "Now Playing");
   press(s.ui, {Rotate{1}});  // the wheel is the volume again
@@ -883,11 +883,11 @@ TEST_CASE("Menu leaves scrub mode and stays in Now Playing") {
 TEST_CASE("scrub mode ends by itself after 3 s without a step") {
   Scrubber s;
   double now = 100.0;
-  s.ui.set_clock([&now] { return now; });
+  s.ui.set_clock([&now] { return Seconds{now}; });
   press(s.ui, {Button::Select});  // scrub mode on
   press(s.ui, {Rotate{1}});       // one step, which also stamps the clock
-  CHECK(s.position() > PlayerUi::kScrubStep - 0.5);
-  now += PlayerUi::kScrubIdle + 1.0;
+  CHECK(s.position() > PlayerUi::kScrubStep.count() - 0.5);
+  now += PlayerUi::kScrubIdle.count() + 1.0;
   s.ui.tick();  // notices the idle time and leaves scrub mode
   const auto volume = s.out.volume;
   press(s.ui, {Rotate{1}});

@@ -97,8 +97,8 @@ void chevron(DrawList& dl, float x, float y, Color c) {
   dl.polyline({pt(x, y - 5), pt(x + 5, y), pt(x, y + 5)}, c, 2.f);
 }
 
-std::string clock(double seconds) {
-  const auto s = static_cast<long>(std::max(0.0, seconds));
+std::string clock(Seconds at) {
+  const auto s = static_cast<long>(std::max(Seconds{0}, at).count());
   return std::format("{}:{:02}", s / 60, s % 60);
 }
 
@@ -278,14 +278,14 @@ void PlayerUi::draw_progress(const Pen& pen, const Player::Status& status) const
   auto& dl = pen.dl;
   const float bar_right = pen.width - kBarMargin;
   const auto fraction =
-      status.duration_s > 0 ? static_cast<float>(status.position_s / status.duration_s) : 0.f;
+      status.duration > Seconds{0} ? static_cast<float>(status.position / status.duration) : 0.f;
   progress_bar(dl, rect(kBarMargin, 168, bar_right - kBarMargin, 8), fraction, kHighlight);
   if (scrubbing_) {
     const float head = kBarMargin + fraction * (bar_right - kBarMargin);
     dl.filled_polygon({pt(head, 167), pt(head + 5, 172), pt(head, 177), pt(head - 5, 172)}, kHighlight);
   }
-  text(dl, clock(status.position_s), kBarMargin, 180, kSmallText, kInk);
-  auto remaining = "-" + clock(status.duration_s - status.position_s);
+  text(dl, clock(status.position), kBarMargin, 180, kSmallText, kInk);
+  auto remaining = "-" + clock(status.duration - status.position);
   const float remaining_x = bar_right - pen.text_width(remaining, kSmallText);
   text(dl, std::move(remaining), remaining_x, 180, kSmallText, kInk);
 }

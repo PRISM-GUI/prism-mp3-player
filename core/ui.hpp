@@ -6,6 +6,7 @@
 #include <prism/core/field.hpp>
 #include <prism/input/input_event.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -112,12 +113,12 @@ public:
   // Where covers come from. Null: Now Playing keeps its placeholder box.
   void set_cover_loader(CoverLoader* loader) { cover_loader_ = loader; }
 
-  // The scrubber: Select in Now Playing turns it on, a wheel step moves this many seconds, and it
-  // lapses after this long without one.
-  static constexpr double kScrubStep = 5.0;
-  static constexpr double kScrubIdle = 3.0;
-  // Where "now" comes from, in seconds: a fake clock in tests, the steady clock by default.
-  void set_clock(std::function<double()> clock) { clock_ = std::move(clock); }
+  // The scrubber: Select in Now Playing turns it on, a wheel step moves `kScrubStep`, and it
+  // lapses after `kScrubIdle` without one.
+  static constexpr Seconds kScrubStep{5.0};
+  static constexpr Seconds kScrubIdle{3.0};
+  // Where "now" comes from: a fake clock in tests, the steady clock by default.
+  void set_clock(std::function<Seconds()> clock) { clock_ = std::move(clock); }
 
   void canvas(render::DrawList&, core::Rect, const ui::WidgetNode&);
   void view(app::ViewBuilder&);
@@ -175,11 +176,11 @@ private:
   Library* library_;
   Storage* storage_ = nullptr;  // the card, for Folders; not the same as the library
   CoverLoader* cover_loader_ = nullptr;
-  std::string cover_path_;              // the track last asked for
-  std::uint64_t cover_revision_ = 0;    // the loader's revision when we last repainted for it
-  std::function<double()> clock_;       // seconds; the steady clock unless a test sets one
-  bool scrubbing_ = false;              // Select in Now Playing: the wheel seeks instead of the volume
-  double scrub_step_at_ = 0;            // the clock at the last step, for the idle lapse
+  std::string cover_path_;            // the track last asked for
+  std::uint64_t cover_revision_ = 0;  // the loader's revision when we last repainted for it
+  std::function<Seconds()> clock_;    // the steady clock unless a test sets one
+  bool scrubbing_ = false;            // Select in Now Playing: the wheel seeks instead of the volume
+  Seconds scrub_step_at_{};           // the clock at the last step, for the idle lapse
   Player& player_;
   int volume_ = kVolumeSteps / 2;
   bool polls_on_tick_ = true;

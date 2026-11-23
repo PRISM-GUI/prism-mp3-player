@@ -32,10 +32,10 @@ public:
   void toggle_pause();
   void next();
   void previous();  // restarts the track if more than 3 s in, else plays the one before
-  // Moves the current track to `seconds`, clamped to its duration: the ring is flushed and refilled
-  // from there. Does nothing when stopped, and a paused player stays paused — even when the seek
-  // runs the track out, the next track is opened and held, not started.
-  void seek(double seconds);
+  // Moves the current track to `at`, clamped to its duration: the ring is flushed and refilled from
+  // there. Does nothing when stopped, and a paused player stays paused — even when the seek runs the
+  // track out, the next track is opened and held, not started.
+  void seek(Seconds at);
   void set_volume(float volume);  // 0..1
   // Reads, decodes, refills the ring, handles the end of a track and a disconnect.
   void poll();
@@ -43,7 +43,7 @@ public:
   struct Status {
     enum class State { Stopped, Playing, Paused } state;
     std::size_t index;
-    double position_s, duration_s;
+    Seconds position, duration;
     std::string message;  // why a track was skipped or playback paused; empty when all is well
   };
   Status status() const;
@@ -58,31 +58,32 @@ private:
   struct Track {
     std::size_t index = 0;
     std::uint64_t start = 0;
-    double duration_s = 0;
+    Seconds duration{};
     std::string message;  // the status message once it plays
   };
 
-  static constexpr auto kWholeRing = std::numeric_limits<std::size_t>::max();  // a frame budget
+  static constexpr auto kWholeRing = std::numeric_limits<std::size_t>::max();  // an MP3 frame budget
   enum class Then { play, hold };  // after opening a track: start the output, or stay paused
-  void start_at(std::size_t index, std::size_t max_frames = kWholeRing,
+  void start_at(std::size_t index, std::size_t max_mp3_frames = kWholeRing,
                 Then then = Then::play);
   void start_output();
   void pause_disconnected();
-  std::string open_track(std::size_t index, double at = 0.0);
-  // Decodes at most `max_frames` frames; the whole ring's worth unless told otherwise.
-  void fill_ring(std::size_t max_frames = kWholeRing);
+  std::string open_track(std::size_t index, Seconds at = Seconds{0});
+  // Decodes at most `max_mp3_frames` MP3 frames; the whole ring's worth unless told otherwise.
+  void fill_ring(std::size_t max_mp3_frames = kWholeRing);
   bool chain_next();
   void push(std::span<const std::int16_t> pcm);
   void promote_played_tracks();
   void halt();
   std::uint64_t played() const;
-  double position_s() const;
+  Seconds position() const;
 
   Storage& storage_;
   PcmOutput& output_;
   // Guards every member below: the UI's thread and the audio thread both call in.
   mutable std::mutex mutex_;
-  PcmRing ring_{2 * kRate48k * 2};  // read by the output's thread without the lock, by design
+  // Read by the output's thread without the lock, by design.
+  PcmRing ring_{static_cast<std::size_t>(samples_at(kRingSeconds, PcmFormat{kRate48k, 2}))};
   std::vector<TrackRow> queue_;
   Status::State state_ = Status::State::Stopped;
   Track current_;

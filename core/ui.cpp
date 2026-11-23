@@ -113,7 +113,9 @@ void PlayerUi::fit_rows(float height) {
 }
 
 PlayerUi::PlayerUi(Library* library, Player& player) : library_(library), player_(player) {
-  clock_ = [] { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
+  clock_ = [] {
+    return std::chrono::duration_cast<Seconds>(std::chrono::steady_clock::now().time_since_epoch());
+  };
   stack_.push_back(menu(Screen::Main));
   player_.set_volume(volume_fraction());
 }
@@ -176,7 +178,7 @@ void PlayerUi::rotate(int steps) {
   if (here().screen != Screen::NowPlaying) return move_selection(here(), steps, rows_on_screen_);
   if (scrubbing_) {
     scrub_step_at_ = clock_();
-    player_.seek(player_.status().position_s + steps * kScrubStep);
+    player_.seek(player_.status().position + steps * kScrubStep);
     return;
   }
   volume_ = std::clamp(volume_ + steps, 0, kVolumeSteps);
@@ -329,8 +331,9 @@ void PlayerUi::tick() {
     changed();  // the marker goes, even on a paused player whose clock does not repaint
   }
   const auto now = player_.status();
-  const bool clock_moved = here().screen == Screen::NowPlaying &&
-                           static_cast<long>(now.position_s) != static_cast<long>(shown_.position_s);
+  const bool clock_moved =
+      here().screen == Screen::NowPlaying &&
+      static_cast<long>(now.position.count()) != static_cast<long>(shown_.position.count());
   const bool same = now.state == shown_.state && now.index == shown_.index && now.message == shown_.message;
   if (same && !clock_moved) return;
   shown_ = now;

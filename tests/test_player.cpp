@@ -118,7 +118,7 @@ double first_frame_duration(std::vector<std::byte> data) {
   s.add("/vbr.mp3", std::move(data));
   Mp3Decoder d{s.open("/vbr.mp3"), 0};
   REQUIRE_FALSE(d.next_frame().empty());
-  return d.duration_s();
+  return d.duration().count();
 }
 
 struct Fixture {
@@ -142,7 +142,7 @@ TEST_CASE("plays a 44.1 kHz file: the output gets ~1 s of a 440 Hz sine") {
   CHECK(p.status().state == State::Playing);
   CHECK(f.out.format().sample_rate == 44100);
   CHECK(f.out.format().channels == 2);
-  CHECK(p.status().duration_s == doctest::Approx(1.0).epsilon(0.1));
+  CHECK(p.status().duration.count() == doctest::Approx(1.0).epsilon(0.1));
   run(p, f.out);
   CHECK(p.status().state == State::Stopped);
   CHECK(loud_samples(f.out.left) == doctest::Approx(44100).epsilon(0.05));
@@ -259,12 +259,12 @@ TEST_CASE("pause stops pulling and keeps the position") {
   p.toggle_pause();
   CHECK(p.status().state == State::Paused);
   CHECK_FALSE(f.out.started());
-  const double at = p.status().position_s;
-  CHECK(at == doctest::Approx(0.2).epsilon(0.1));
+  const auto at = p.status().position;
+  CHECK(at.count() == doctest::Approx(0.2).epsilon(0.1));
   p.poll();
   p.toggle_pause();
   CHECK(p.status().state == State::Playing);
-  CHECK(p.status().position_s == doctest::Approx(at));
+  CHECK(p.status().position == at);
 }
 
 TEST_CASE("underruns are counted when the ring runs dry") {
@@ -320,8 +320,8 @@ TEST_CASE("a track's position counts from its own start when tracks are chained"
     f.out.pull(441);
   }
   CHECK(p.status().index == 1);
-  CHECK(p.status().position_s < 0.05);
-  CHECK(p.status().duration_s == doctest::Approx(4.0).epsilon(0.1));
+  CHECK(p.status().position < Seconds{0.05});
+  CHECK(p.status().duration.count() == doctest::Approx(4.0).epsilon(0.1));
 }
 
 TEST_CASE("a refusing output stops with its own message, without walking the queue") {
@@ -354,20 +354,20 @@ TEST_CASE("previous within 3 s goes back a track, after 3 s restarts") {
     p.poll();
     f.out.pull(441);
   }
-  CHECK(p.status().position_s < 3.0);
+  CHECK(p.status().position < Seconds{3});
   p.previous();
   CHECK(p.status().index == 0);
 
   p.play({row("/44k.mp3"), row("/4s.mp3")}, 1);
-  CHECK(p.status().duration_s == doctest::Approx(4.0).epsilon(0.1));
+  CHECK(p.status().duration.count() == doctest::Approx(4.0).epsilon(0.1));
   for (int i = 0; i < 350; ++i) {
     p.poll();
     f.out.pull(441);
   }
-  CHECK(p.status().position_s > 3.0);
+  CHECK(p.status().position > Seconds{3});
   p.previous();
   CHECK(p.status().index == 1);
-  CHECK(p.status().position_s < 0.1);
+  CHECK(p.status().position < Seconds{0.1});
 }
 
 TEST_CASE("volume is forwarded to the output, clamped to 0..1") {
@@ -497,7 +497,7 @@ TEST_CASE("a poll decodes at most 8 frames") {
 }
 
 // The 4 s track is longer than the 2 s ring, so play() cannot prefill all of it: every step
-// below really decodes. Run with kFramesPerPoll at 0, the ring drains and underruns() is not 0.
+// below really decodes. Run with kMp3FramesPerPoll at 0, the ring drains and underruns() is not 0.
 TEST_CASE("a 5 ms poll cadence keeps up") {
   Fixture f;
   Player p{f.storage, f.out};
@@ -550,14 +550,14 @@ TEST_CASE("seek moves the position and the next audio comes from there") {
   Fixture f;
   Player p{f.storage, f.out};
   p.play({row("/4s.mp3")}, 0);
-  const auto total = p.status().duration_s;
-  REQUIRE(total > 3.5);
-  p.seek(2.0);
-  CHECK(std::abs(p.status().position_s - 2.0) < 0.1);
+  const auto total = p.status().duration;
+  REQUIRE(total > Seconds{3.5});
+  p.seek(Seconds{2.0});
+  CHECK(std::abs(p.status().position.count() - 2.0) < 0.1);
   f.out.pull(1000);  // 1000 frames: about 23 ms of audio
-  CHECK(p.status().position_s > 2.0);
-  CHECK(p.status().position_s < 2.2);
-  p.seek(total - 0.25);  // a quarter of a second left to play
+  CHECK(p.status().position > Seconds{2.0});
+  CHECK(p.status().position < Seconds{2.2});
+  p.seek(total - Seconds{0.25});  // a quarter of a second left to play
   f.out.pull(22'050);    // half a second of audio, so the track runs out
   p.poll();
   CHECK(p.status().state == State::Stopped);
@@ -570,14 +570,14 @@ TEST_CASE("a seek at or past the end ends the track; before 0 it goes to the sta
   Player p{f.storage, f.out};
   p.play({row("/44k.mp3"), row("/48k.mp3")}, 0);
   REQUIRE(p.status().index == 0);
-  p.seek(100.0);
+  p.seek(Seconds{100});
   p.poll();
   CHECK(p.status().index == 1);
   CHECK(p.status().state == State::Playing);
-  CHECK(p.status().position_s < 0.5);
+  CHECK(p.status().position < Seconds{0.5});
 
-  p.seek(-5.0);
-  CHECK(p.status().position_s < 0.1);
+  p.seek(Seconds{-5});
+  CHECK(p.status().position < Seconds{0.1});
   CHECK(p.status().state == State::Playing);
   CHECK(p.status().index == 1);
 }
@@ -588,9 +588,9 @@ TEST_CASE("seek while paused stays paused") {
   p.play({row("/4s.mp3")}, 0);
   p.toggle_pause();
   REQUIRE(p.status().state == State::Paused);
-  p.seek(1.5);
+  p.seek(Seconds{1.5});
   CHECK(p.status().state == State::Paused);
-  CHECK(std::abs(p.status().position_s - 1.5) < 0.1);
+  CHECK(std::abs(p.status().position.count() - 1.5) < 0.1);
 }
 
 TEST_CASE("a seek past the end while paused moves to the next track, still paused") {
@@ -599,10 +599,10 @@ TEST_CASE("a seek past the end while paused moves to the next track, still pause
   p.play({row("/44k.mp3"), row("/48k.mp3")}, 0);
   p.toggle_pause();
   REQUIRE(p.status().state == State::Paused);
-  p.seek(100.0);  // past the end of the first track
+  p.seek(Seconds{100});  // past the end of the first track
   CHECK(p.status().index == 1);
   CHECK(p.status().state == State::Paused);  // the queue moves on, nothing starts playing
-  CHECK(p.status().position_s < 0.5);
+  CHECK(p.status().position < Seconds{0.5});
   REQUIRE(p.current_track().has_value());
   CHECK(p.current_track()->path == "/48k.mp3");
 }
@@ -610,9 +610,9 @@ TEST_CASE("a seek past the end while paused moves to the next track, still pause
 TEST_CASE("seek when stopped does nothing") {
   Fixture f;
   Player p{f.storage, f.out};
-  p.seek(5.0);
+  p.seek(Seconds{5});
   CHECK(p.status().state == State::Stopped);
-  CHECK(p.status().position_s == 0.0);
+  CHECK(p.status().position == Seconds{0});
   CHECK(p.queue_size() == 0U);
   CHECK(f.out.starts == 0);
 }

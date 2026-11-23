@@ -80,10 +80,10 @@ std::span<const std::int16_t> Mp3Decoder::next_frame() {
   }
 }
 
-double Mp3Decoder::duration_s() const {
-  if (vbr_samples_ != 0) return static_cast<double>(vbr_samples_) / sample_rate_;
-  if (bitrate_kbps_ == 0) return 0;
-  return static_cast<double>(file_->size() - audio_offset_) * 8.0 / (bitrate_kbps_ * 1000.0);
+Seconds Mp3Decoder::duration() const {
+  if (vbr_samples_ != 0) return Seconds{static_cast<double>(vbr_samples_) / sample_rate_};
+  if (bitrate_kbps_ == 0) return Seconds{0};
+  return Seconds{static_cast<double>(file_->size() - audio_offset_) * 8.0 / (bitrate_kbps_ * 1000.0)};
 }
 
 // Drops what the buffer still holds and reads on from `byte`: minimp3 resyncs on the next frame
