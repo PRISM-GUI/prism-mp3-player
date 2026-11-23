@@ -1,4 +1,5 @@
 #pragma once
+#include "core/folders.hpp"
 #include "core/library.hpp"
 #include "core/player.hpp"
 #include "core/wheel.hpp"
@@ -55,13 +56,9 @@ public:
   };
 
   enum class Screen { Main, Music, List, NowPlaying, Settings, Folders };
-  // A list row: its label, and a value shown right-aligned (a setting's, an album's artist).
-  struct Row {
-    std::string label, value;
-    // A Folders row that opens rather than plays. The label keeps its trailing '/' because that is
-    // what the user reads; this flag is what the code decides on.
-    bool folder = false;
-  };
+  // A list row: its label, and a value shown right-aligned (a setting's, an album's artist). The
+  // shape lives in core/folders.hpp, shared with the folder browser.
+  using Row = FolderRow;
   // A screen on the stack, with its own selection so Menu comes back to where it was.
   struct Place {
     Screen screen;
@@ -151,7 +148,6 @@ private:
   void select_folder_row();
   void open_folder(std::string_view dir);
   void play_folder(std::string_view dir, std::size_t row);
-  std::vector<Row> read_folder(std::string_view dir) const;
 
   void draw_title(const Pen&) const;
   void draw_menu(const Pen&) const;

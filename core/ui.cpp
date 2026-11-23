@@ -1,9 +1,7 @@
 #include "core/ui.hpp"
 
 #include "core/cover_loader.hpp"
-#include "core/fold.hpp"
 #include "core/path.hpp"
-#include "core/tags.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,43 +13,7 @@ namespace {
 
 using Screen = PlayerUi::Screen;
 
-// simplify: Select in a song view (Songs, an album) of at most 500 songs queues the whole view;
-// in a larger one, a window of 500 songs, up to 250 of them before the selected one (10,000
-// TrackRows would take MBs of RAM on the board). Upgrade: a Player queue that pages its tracks
-// from the Library by view and row.
-constexpr std::size_t kSongsQueue = 500;
-constexpr std::size_t kSongsBefore = kSongsQueue / 2;
-// simplify: a folder reads the tags of the 32 songs around the selection, not of the 500 it can
-// queue: a 2,000-song folder would otherwise open 2,000 files before anything plays. The rest are
-// named by their file. Upgrade: read a track's tags when it starts, or take the rows from the
-// index when the folder is in it.
-constexpr std::size_t kTagWindow = 32;
-
 constexpr std::array kMusicViews{View::Artists, View::Albums, View::Songs};
-
-// The rows a Select queues from a list of `count` rows: the whole list when it fits in a queue,
-// else a queue of kSongsQueue rows reaching back kSongsBefore before the selected one.
-struct Window {
-  std::size_t first, last;
-};
-
-Window queue_window(std::size_t count, std::size_t row) {
-  if (count <= kSongsQueue) return {0, count};
-  const auto first = row - std::min(row, kSongsBefore);
-  return {first, std::min(first + kSongsQueue, count)};
-}
-
-// The file's name without its folder and its extension: what a row says when its tags were not read.
-std::string file_stem(std::string_view path) {
-  const auto name = file_name(path);
-  const auto dot = name.find_last_of('.');
-  return std::string{dot == std::string_view::npos ? name : name.substr(0, dot)};
-}
-
-TrackRow row_from_file(std::string path) {
-  auto title = file_stem(path);
-  return {std::move(path), std::move(title), {}, {}, 0};
-}
 
 std::string_view list_title(const ViewKey& key) {
   switch (key.view) {
@@ -255,70 +217,19 @@ void PlayerUi::select_folder_row() {
 }
 
 // Lists the folder once, when it is entered: subfolders first with a trailing '/', then its .mp3
-// files, each group by the library's own order, and by the library's own rules about what counts.
+// files, by the browser's own rules (core/folders.hpp).
 void PlayerUi::open_folder(std::string_view dir) {
   Place place{.screen = Screen::Folders, .dir = std::string{dir}};
-  place.rows = read_folder(dir);
+  place.rows = folder_rows(*storage_, dir);
   place.count = place.rows.size();
   open(std::move(place));
 }
 
-std::vector<PlayerUi::Row> PlayerUi::read_folder(std::string_view dir) const {
-  struct Entry {
-    std::string name;  // what the row shows: a folder keeps its trailing '/'
-    std::string key;   // the folded name, made once: sorting thousands folds nothing twice
-    bool is_dir;
-  };
-  std::vector<Entry> entries;
-  for (const auto& e : storage_->list(dir)) {
-    if (e.name.starts_with('.')) continue;
-    if (e.is_dir && is_card_system_dir(e.name)) continue;
-    if (!e.is_dir && !is_mp3_name(e.name)) continue;
-    entries.push_back({e.is_dir ? e.name + "/" : e.name, fold_for_sort(e.name), e.is_dir});
-  }
-  std::ranges::stable_sort(entries, [](const Entry& a, const Entry& b) {
-    if (a.is_dir != b.is_dir) return a.is_dir;
-    return a.key < b.key;
-  });
-  std::vector<Row> rows;
-  rows.reserve(entries.size());
-  for (auto& e : entries) rows.push_back({std::move(e.name), {}, e.is_dir});
-  return rows;
-}
-
-// Plays the folder's own .mp3 files from `row`, by the window rule a song view uses. A subfolder is
-// never in the queue, and a file that cannot be opened keeps its place in it, so the player names
-// the song that failed instead of the queue shifting under the selection.
+// Plays the folder's own .mp3 files from `row`, by the window rule a song view uses.
 void PlayerUi::play_folder(std::string_view dir, std::size_t row) {
-  const auto& place = here();
-  std::vector<std::string> paths;
-  std::size_t first_file = 0;
-  for (std::size_t i = 0; i < place.rows.size(); ++i) {
-    if (place.rows[i].folder) continue;
-    if (i == row) first_file = paths.size();
-    paths.push_back(join(dir, place.rows[i].label));
-  }
-  if (paths.empty()) return;
-  const auto [first, last] = queue_window(paths.size(), first_file);
-  if (first_file < first || first_file >= last) return;
-  const auto tagged = first_file - std::min(first_file, kTagWindow / 2);
-  const auto tagged_end = std::min(tagged + kTagWindow, paths.size());
-  std::vector<TrackRow> queue;
-  queue.reserve(last - first);
-  for (auto i = first; i < last; ++i) {
-    if (i < tagged || i >= tagged_end) {
-      queue.push_back(row_from_file(paths[i]));
-      continue;
-    }
-    auto file = storage_->open(paths[i]);
-    if (!file) {
-      queue.push_back(row_from_file(paths[i]));
-      continue;
-    }
-    const auto tags = read_tags(*file, file_name(paths[i]));
-    queue.push_back({paths[i], tags.title, tags.artist, tags.album, tags.track});
-  }
-  player_.play(std::move(queue), first_file - first);
+  auto queued = folder_queue(*storage_, dir, here().rows, row);
+  if (!queued) return;
+  player_.play(std::move(queued->tracks), queued->start);
   open(menu(Screen::NowPlaying));
 }
 

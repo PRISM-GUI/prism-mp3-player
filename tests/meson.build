@@ -23,6 +23,9 @@ test('wheel', executable('test_wheel', files('test_wheel.cpp'),
 test('cover_loader', executable('test_cover_loader', files('test_cover_loader.cpp'),
   dependencies : [player_core_dep, doctest_dep]))
 
+test('folders', executable('test_folders', files('test_folders.cpp'),
+  dependencies : [player_core_dep, doctest_dep]))
+
 test('shrink', executable('test_shrink', files('test_shrink.cpp'),
   dependencies : [player_core_dep, doctest_dep]))
 
