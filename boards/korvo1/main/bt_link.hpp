@@ -190,7 +190,7 @@ private:
     if (link_ != Link::connected) return;
     if (stream_.checking || stream_.starting || stream_.streaming) return;
     if (!stream_.ready) return send_media(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY, stream_.checking);
-    if (shared.ring.load()) send_media(ESP_A2D_MEDIA_CTRL_START, stream_.starting);
+    if (shared.tap.attached()) send_media(ESP_A2D_MEDIA_CTRL_START, stream_.starting);
   }
 
   void send_media(esp_a2d_media_ctrl_t command, bool& in_flight) {

@@ -1,5 +1,6 @@
 #include "speaker_output.hpp"
 
+#include "core/ring_tap.hpp"
 #include "thread_config.hpp"
 
 #include <bsp/esp32_s31_korvo_1.h>
@@ -39,9 +40,7 @@ struct SpeakerOutput::Impl {
   std::atomic<int> volume{kMaxVolume};
   std::mutex codec_mutex;  // one write against a close-and-reopen, and against set_out_vol
 
-  std::atomic<PcmRing*> ring{nullptr};       // what the writer pops from while the player plays
-  std::atomic<PcmRing*> last_ring{nullptr};  // so underruns() survives a pause
-  std::atomic<bool> inside{false};           // the writer is reading the ring right now
+  RingTap tap;  // what the writer pops from, and the handshake with the logic thread
 
   std::mutex mutex;  // guards the wait, not the ring
   std::condition_variable wake;
@@ -67,30 +66,25 @@ struct SpeakerOutput::Impl {
   }
 
   void attach(PcmRing& next) {
-    last_ring = &next;
     {
       const std::lock_guard lock(mutex);
-      ring = &next;
+      tap.attach(next);
     }
     wake.notify_all();
   }
 
-  // core/audio.hpp: the player clears the ring once this returns. Clearing the pointer before
-  // looking at `inside` is what makes that safe: the writer sets `inside` before it reads the
-  // pointer, and clears it after its last read of the ring.
+  // core/audio.hpp: the player clears the ring once this returns. The tap clears the pointer before
+  // it looks at who is inside, which is what makes that safe; the mutex is not part of the
+  // handshake, so it is not held while waiting.
   void detach() {
-    {
-      const std::lock_guard lock(mutex);
-      ring = nullptr;
-    }
+    tap.detach();
     wake.notify_all();
-    while (inside.load()) std::this_thread::yield();
   }
 
   // Waits for a ring to play from. False: shutting down.
   bool wait_for_ring() {
     std::unique_lock lock(mutex);
-    wake.wait(lock, [this] { return quit || ring != nullptr; });
+    wake.wait(lock, [this] { return quit || tap.attached(); });
     return !quit;
   }
 
@@ -98,12 +92,7 @@ struct SpeakerOutput::Impl {
     std::vector<std::int16_t> buffer(kFrames * 2);
     const std::span<std::int16_t> samples{buffer};
     while (wait_for_ring()) {
-      inside = true;  // silence if the ring went away in between, which is one buffer's worth
-      if (auto* source = ring.load())
-        source->pop(samples);
-      else
-        std::fill(samples.begin(), samples.end(), std::int16_t{0});
-      inside = false;
+      tap.pop_or_silence(samples);  // silence if the ring went away in between: one buffer's worth
       write(buffer);
     }
   }
@@ -190,11 +179,7 @@ void SpeakerOutput::stop() { impl_->detach(); }
 
 bool SpeakerOutput::connected() const { return impl_->opened.load(); }
 
-std::uint32_t SpeakerOutput::underruns() const {
-  auto* ring = impl_->ring.load();  // the last attached one when the player is paused
-  if (!ring) ring = impl_->last_ring.load();
-  return ring ? ring->underruns() : 0;
-}
+std::uint32_t SpeakerOutput::underruns() const { return impl_->tap.underruns(); }
 
 void SpeakerOutput::set_volume(float volume) {
   impl_->volume = static_cast<int>(std::clamp(volume, 0.f, 1.f) * kMaxVolume);

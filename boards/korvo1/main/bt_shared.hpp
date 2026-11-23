@@ -6,6 +6,7 @@
 // definition the whole component shares.
 
 #include "core/audio.hpp"
+#include "core/ring_tap.hpp"
 #include "core/wheel.hpp"
 
 #include <esp_a2dp_api.h>
@@ -62,9 +63,7 @@ struct Event {
 // What the threads share: the ring with the data callback, the link's state and the headset's name
 // with the logic thread. One headset, one instance.
 struct Shared {
-  std::atomic<PcmRing*> ring{nullptr};       // what the callback pops from, while the player plays
-  std::atomic<PcmRing*> last_ring{nullptr};  // the last one, so underruns() survives a pause
-  std::atomic<bool> in_callback{false};      // the data callback is inside the ring
+  RingTap tap;  // what the callback pops from, and the handshake with stop()
   std::atomic<int> gain{kUnityGain};
   std::atomic<Link> link{Link::waiting};     // written by the link task only
   std::atomic<std::uint32_t> revision{1};    // changes when state_text() would say something else

@@ -15,7 +15,6 @@
 #include <mutex>
 #include <span>
 #include <string>
-#include <thread>
 #include <utility>
 
 namespace player::bt_link {
@@ -24,18 +23,13 @@ namespace player::bt_link {
 // or takes a lock (core/audio.hpp).
 std::int32_t data_callback(std::uint8_t* data, std::int32_t length) {
   if (!data || length <= 0) return 0;  // a null buffer means the stream is stopping
-  shared.in_callback = true;
   const auto frames = static_cast<std::size_t>(length) / kBytesPerFrame;
   const auto samples = std::span<std::int16_t>{reinterpret_cast<std::int16_t*>(data), frames * 2};
-  if (auto* ring = shared.ring.load())
-    ring->pop(samples);
-  else
-    std::fill(samples.begin(), samples.end(), std::int16_t{0});
+  shared.tap.pop_or_silence(samples);
   const auto gain = shared.gain.load();
   if (gain != kUnityGain)
     for (auto& sample : samples)
       sample = static_cast<std::int16_t>((static_cast<std::int32_t>(sample) * gain) >> kGainBits);
-  shared.in_callback = false;
   return static_cast<std::int32_t>(samples.size() * sizeof(std::int16_t));
 }
 
@@ -56,8 +50,7 @@ bool BtOutput::accepts(PcmFormat format) const {
 
 bool BtOutput::start(PcmFormat format, PcmRing& ring) {
   if (!accepts(format)) return false;
-  bt_link::shared.last_ring = &ring;
-  bt_link::shared.ring = &ring;
+  bt_link::shared.tap.attach(ring);
   // The link task starts the stream if it is not running yet.
   bt_link::post(bt_link::event(bt_link::Event::Kind::play));
   return true;
@@ -66,18 +59,11 @@ bool BtOutput::start(PcmFormat format, PcmRing& ring) {
 // core/audio.hpp: the player clears the ring once this returns, so the callback must be out of it
 // and unable to reach it again. It never blocks, so the spin is one buffer long at most.
 // The stream itself keeps running: it sends silence while no ring is attached (see Stream).
-void BtOutput::stop() {
-  bt_link::shared.ring = nullptr;
-  while (bt_link::shared.in_callback) std::this_thread::yield();
-}
+void BtOutput::stop() { bt_link::shared.tap.detach(); }
 
 bool BtOutput::connected() const { return bt_link::shared.link == bt_link::Link::connected; }
 
-std::uint32_t BtOutput::underruns() const {
-  auto* ring = bt_link::shared.ring.load();  // the last attached one when the player is paused
-  if (!ring) ring = bt_link::shared.last_ring.load();
-  return ring ? ring->underruns() : 0;
-}
+std::uint32_t BtOutput::underruns() const { return bt_link::shared.tap.underruns(); }
 
 std::uint32_t BtOutput::state_revision() const { return bt_link::shared.revision.load(); }
 
