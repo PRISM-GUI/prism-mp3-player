@@ -31,10 +31,16 @@ constexpr std::array kMusicViews{View::Artists, View::Albums, View::Songs};
 
 bool is_song_view(View v) { return v == View::Songs || v == View::SongsOfAlbum; }
 
+// The file's name without its folder: what read_tags needs, since it names an untagged file by the
+// name it is handed.
+std::string_view file_name_of(std::string_view path) {
+  const auto slash = path.find_last_of('/');
+  return slash == std::string_view::npos ? path : path.substr(slash + 1);
+}
+
 // The file's name without its folder and its extension: what a row says when its tags were not read.
 std::string file_stem(std::string_view path) {
-  const auto slash = path.find_last_of('/');
-  const auto name = slash == std::string_view::npos ? path : path.substr(slash + 1);
+  const auto name = file_name_of(path);
   const auto dot = name.find_last_of('.');
   return std::string{dot == std::string_view::npos ? name : name.substr(0, dot)};
 }
@@ -305,7 +311,7 @@ void PlayerUi::play_folder(std::string_view dir, std::size_t row) {
       queue.push_back(row_from_file(paths[i]));
       continue;
     }
-    const auto tags = read_tags(*file, paths[i]);
+    const auto tags = read_tags(*file, file_name_of(paths[i]));
     queue.push_back({paths[i], tags.title, tags.artist, tags.album, tags.track});
   }
   player_.play(std::move(queue), first_file - first);

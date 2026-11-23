@@ -825,6 +825,25 @@ TEST_CASE("Now Playing draws the track's cover once loaded, the placeholder befo
   CHECK(draws_image(after));
 }
 
+// read_tags names a file by the name it is handed, so folder playback must pass the file's own
+// name: the whole path would title an untagged song "Album/song".
+TEST_CASE("an untagged file played from Folders is titled by its file name") {
+  MemoryStorage storage;
+  // Real audio but no tags at all: the player must be able to open it, or it would skip on to the
+  // next track and the title under test would never be the one playing.
+  storage.add("/Album/song.mp3", load("sine440_44k.mp3"), 1000);
+  add_song(storage, "/Album/tagged.mp3", "Tagged", "abba", "Gold", 1, load("sine440_44k.mp3"));
+  FakeOutput out;
+  Player player{storage, out};
+  PlayerUi ui{nullptr, player};
+  ui.set_storage(&storage);
+  // Music → Folders → Card → Album → song.mp3
+  press(ui, {Button::Select, Button::Select, Button::Select, Button::Select});
+  REQUIRE(player.current_track().has_value());
+  CHECK(player.current_track()->path == "/Album/song.mp3");
+  CHECK(player.current_track()->title == "song");
+}
+
 namespace {
 
 // The scrubber's diamond: a filled polygon in the highlight colour, on the progress bar (y 168..176),
