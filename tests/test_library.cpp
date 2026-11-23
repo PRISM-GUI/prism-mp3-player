@@ -4,6 +4,7 @@
 #include "core/library.hpp"
 #include "core/memory_storage.hpp"
 #include "tests/counting_storage.hpp"
+#include "tests/library_fixtures.hpp"
 #include "tests/tag_builder.hpp"
 #include "tests/temp_dir.hpp"
 
@@ -45,29 +46,7 @@ void operator delete(void* p, std::size_t) noexcept { operator delete(p); }
 
 namespace {
 
-Bytes song(std::string_view title, std::string_view artist, std::string_view album, int track) {
-  auto b = id3v2(3, {frame(3, "TIT2", utf8_text(title)), frame(3, "TPE1", utf8_text(artist)),
-                     frame(3, "TALB", utf8_text(album)),
-                     frame(3, "TRCK", latin1_text(std::to_string(track)))});
-  append(b, fake_audio(16));
-  return b;
-}
-
-void add_song(MemoryStorage& s, std::string path, std::string_view title, std::string_view artist,
-              std::string_view album, int track) {
-  s.add(std::move(path), song(title, artist, album, track), 1000);
-}
-
 const auto keep_going = [](int) { return true; };
-
-void fill_six(MemoryStorage& s) {
-  add_song(s, "/music/b/zeta2.mp3", "Second", "Beta Band", "Zeta", 2);
-  add_song(s, "/music/b/zeta1.mp3", "First", "Beta Band", "Zeta", 1);
-  add_song(s, "/music/b/alpha.mp3", "Only", "Beta Band", "Alpha", 1);
-  add_song(s, "/music/a/g3.mp3", "Three", "abba", "Gold", 3);
-  add_song(s, "/music/a/g1.mp3", "One", "abba", "Gold", 1);
-  add_song(s, "/music/a/g2.mp3", "Two", "abba", "Gold", 2);
-}
 
 std::unique_ptr<Library> built(Storage& s) {
   REQUIRE(Library::build(s, "/music", keep_going));
@@ -90,15 +69,6 @@ Bytes read_all(Storage& s, std::string_view path) {
   Bytes b(f->size());
   REQUIRE(f->read(0, b) == b.size());
   return b;
-}
-
-void fill_generated(MemoryStorage& s, int artists, int per_artist) {
-  for (int a = 0; a < artists; ++a)
-    for (int t = 0; t < per_artist; ++t) {
-      const int n = a * per_artist + t;
-      add_song(s, std::format("/music/{:03}/{:05}.mp3", a, n), std::format("Song {:05}", n),
-               std::format("Artist {:03}", a), std::format("Album {:03}", a), t + 1);
-    }
 }
 
 }  // namespace
@@ -333,7 +303,7 @@ TEST_CASE("building 10,000 tracks with realistic names peaks under 4 MB of heap"
       for (int t = 0; t < 10; ++t) {
         const int n = (a * 2 + al) * 10 + t;
         d.write(std::format("{}/{:02} A Fairly Long Song {:05}.mp3", dir, t + 1, n),
-                song(std::format("A Fairly Long Song Title {:05}", n), artist, album, t + 1));
+                tagged_song(std::format("A Fairly Long Song Title {:05}", n), artist, album, t + 1));
       }
     }
   DirStorage s{d.path};

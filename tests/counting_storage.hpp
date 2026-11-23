@@ -1,8 +1,11 @@
 #pragma once
-#include "core/storage.hpp"
+#include "tests/forwarding_storage.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace player::testing {
@@ -23,22 +26,16 @@ private:
 };
 
 // Counts the bytes read through it and logs the paths opened.
-class CountingStorage final : public Storage {
+class CountingStorage final : public ForwardingStorage {
 public:
-  explicit CountingStorage(Storage& inner) : inner_(inner) {}
-  std::vector<DirEntry> list(std::string_view dir) override { return inner_.list(dir); }
+  explicit CountingStorage(Storage& inner) : ForwardingStorage(inner) {}
   std::unique_ptr<File> open(std::string_view path) override {
     opened.emplace_back(path);
     auto f = inner_.open(path);
     return f ? std::make_unique<CountingFile>(std::move(f), bytes_read) : nullptr;
   }
-  std::unique_ptr<std::ostream> create(std::string_view path) override { return inner_.create(path); }
-  bool rename(std::string_view from, std::string_view to) override { return inner_.rename(from, to); }
   std::size_t bytes_read = 0;
   std::vector<std::string> opened;
-
-private:
-  Storage& inner_;
 };
 
 }  // namespace player::testing

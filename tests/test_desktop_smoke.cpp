@@ -2,14 +2,13 @@
 #include "desktop/desktop_app.hpp"
 #include "tests/tag_builder.hpp"
 #include "tests/temp_dir.hpp"
+#include "tests/test_data.hpp"
 
 #include <doctest.h>
 
 #include <prism/app/model_app.hpp>
 
 #include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <unistd.h>
 
 using namespace player;
@@ -19,19 +18,9 @@ namespace keys = prism::input::keys;
 
 namespace {
 
-Bytes load(std::string_view name) {
-  std::ifstream in{std::string{TEST_DATA_DIR} + "/" + std::string{name}, std::ios::binary};
-  REQUIRE(in);
-  std::vector<char> chars{std::istreambuf_iterator<char>{in}, {}};
-  const auto* p = reinterpret_cast<const std::byte*>(chars.data());
-  return {p, p + chars.size()};
-}
-
 void write_song(const TempDir& dir, int n) {
-  auto b = id3v2(3, {frame(3, "TIT2", utf8_text("Song " + std::to_string(n))), frame(3, "TPE1", utf8_text("Tone")),
-                     frame(3, "TALB", utf8_text("Sines")), frame(3, "TRCK", latin1_text(std::to_string(n)))});
-  append(b, load("sine440_44k.mp3"));
-  dir.write("music/song" + std::to_string(n) + ".mp3", b);
+  const auto song = tagged_song("Song " + std::to_string(n), "Tone", "Sines", n, load("sine440_44k.mp3"));
+  dir.write("music/song" + std::to_string(n) + ".mp3", song);
 }
 
 void press(DesktopApp& app, std::initializer_list<int> keys) {

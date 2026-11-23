@@ -2,13 +2,12 @@
 #include "core/memory_storage.hpp"
 #include "core/pcm_ring.hpp"
 #include "core/player.hpp"
+#include "tests/test_data.hpp"
 
 #include <doctest.h>
 
 #include <atomic>
 #include <chrono>
-#include <fstream>
-#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -19,14 +18,6 @@ using namespace player;
 using State = Player::Status::State;
 
 namespace {
-
-std::vector<std::byte> load(std::string_view name) {
-  std::ifstream in{std::string{TEST_DATA_DIR} + "/" + std::string{name}, std::ios::binary};
-  REQUIRE(in);
-  std::vector<char> chars{std::istreambuf_iterator<char>{in}, {}};
-  const auto* p = reinterpret_cast<const std::byte*>(chars.data());
-  return {p, p + chars.size()};
-}
 
 // The output as its own callback thread sees it: pull() runs beside the logic thread's commands,
 // which reach stop() and start() through the Player, so this state is guarded here too.
@@ -78,7 +69,7 @@ TrackRow row(std::string path) { return {std::move(path), "t", "a", "b", 1}; }
 // commands and the audio thread's poll() must never touch a member at the same time.
 TEST_CASE("commands from another thread while poll runs") {
   MemoryStorage storage;
-  const auto mp3 = load("sine440_44k.mp3");
+  const auto mp3 = testing::load("sine440_44k.mp3");
   for (const auto* name : {"/a.mp3", "/b.mp3", "/c.mp3"}) storage.add(name, mp3);
   Sink sink;
   Player p{storage, sink};

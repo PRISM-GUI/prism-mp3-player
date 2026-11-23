@@ -3,30 +3,25 @@
 #include "core/memory_storage.hpp"
 #include "core/pcm_ring.hpp"
 #include "core/player.hpp"
+#include "tests/fake_output.hpp"
+#include "tests/forwarding_storage.hpp"
 #include "tests/tag_builder.hpp"
+#include "tests/test_data.hpp"
 
 #include <doctest.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <fstream>
-#include <iterator>
 #include <random>
 #include <set>
 
 using namespace player;
+using testing::FakeOutput;
+using testing::ForwardingStorage;
 using State = Player::Status::State;
 
 namespace {
-
-std::vector<std::byte> load(std::string_view name) {
-  std::ifstream in{std::string{TEST_DATA_DIR} + "/" + std::string{name}, std::ios::binary};
-  REQUIRE(in);
-  std::vector<char> chars{std::istreambuf_iterator<char>{in}, {}};
-  const auto* p = reinterpret_cast<const std::byte*>(chars.data());
-  return {p, p + chars.size()};
-}
 
 std::vector<std::byte> repeated(const std::vector<std::byte>& data, int times) {
   std::vector<std::byte> out;
@@ -40,49 +35,6 @@ std::vector<std::byte> random_bytes(std::size_t n) {
   for (auto& b : out) b = std::byte(gen());
   return out;
 }
-
-class FakeOutput final : public PcmOutput {
-public:
-  bool accepts(PcmFormat format) const override { return rates.contains(format.sample_rate); }
-  bool start(PcmFormat format, PcmRing& ring) override {
-    if (start_fails || !accepts(format)) return false;
-    format_ = format;
-    ring_ = &ring;
-    queued_at_start = ring.size();
-    ++starts;
-    return true;
-  }
-  void stop() override { ring_ = nullptr; }
-  bool connected() const override { return is_connected && (!connects_on_start || ring_ != nullptr); }
-  std::uint32_t underruns() const override { return ring_ ? ring_->underruns() : last_underruns_; }
-  void set_volume(float v) override { volume = v; }
-
-  // What the sink's callback thread does: takes `frames` stereo frames, when started.
-  void pull(std::size_t frames) {
-    if (!ring_) return;
-    std::vector<std::int16_t> buf(frames * 2);
-    ring_->pop(buf);
-    last_underruns_ = ring_->underruns();
-    for (std::size_t i = 0; i < buf.size(); i += 2) left.push_back(buf[i]);
-  }
-  bool started() const { return ring_ != nullptr; }
-  std::size_t buffered() const { return ring_ ? ring_->size() : 0; }
-  PcmFormat format() const { return format_; }
-
-  std::set<int> rates{44100, 48000};
-  bool start_fails = false;
-  bool is_connected = true;
-  bool connects_on_start = false;  // a sink that reports connected() only after start()
-  float volume = -1;
-  int starts = 0;
-  std::size_t queued_at_start = 0;
-  std::vector<std::int16_t> left;
-
-private:
-  PcmRing* ring_ = nullptr;
-  PcmFormat format_{};
-  std::uint32_t last_underruns_ = 0;
-};
 
 TrackRow row(std::string path) { return {std::move(path), "t", "a", "b", 1}; }
 
@@ -112,16 +64,13 @@ void run(Player& p, FakeOutput& out, std::size_t frames = 441, int max_steps = 2
 }
 
 // Counts the files open and the bytes read below `limit` in them.
-class WatchedStorage final : public Storage {
+class WatchedStorage final : public ForwardingStorage {
 public:
-  explicit WatchedStorage(Storage& inner) : inner_(inner) {}
-  std::vector<DirEntry> list(std::string_view dir) override { return inner_.list(dir); }
+  explicit WatchedStorage(Storage& inner) : ForwardingStorage(inner) {}
   std::unique_ptr<File> open(std::string_view path) override {
     auto f = inner_.open(path);
     return f ? std::make_unique<WatchedFile>(std::move(f), *this) : nullptr;
   }
-  std::unique_ptr<std::ostream> create(std::string_view path) override { return inner_.create(path); }
-  bool rename(std::string_view from, std::string_view to) override { return inner_.rename(from, to); }
 
   std::uint64_t limit = 0;
   std::size_t bytes_below_limit = 0;
@@ -143,7 +92,6 @@ private:
     std::unique_ptr<File> inner_;
     WatchedStorage& s_;
   };
-  Storage& inner_;
 };
 
 // MPEG-1 Layer III, 128 kbit/s, 44.1 kHz, stereo, no CRC: a 417-byte frame of silence.
@@ -177,10 +125,10 @@ struct Fixture {
   MemoryStorage storage;
   FakeOutput out;
   Fixture() {
-    storage.add("/44k.mp3", load("sine440_44k.mp3"));
-    storage.add("/48k.mp3", load("sine440_48k.mp3"));
-    storage.add("/32k.mp3", load("sine440_32k.mp3"));
-    storage.add("/4s.mp3", repeated(load("sine440_44k.mp3"), 4));
+    storage.add("/44k.mp3", testing::load("sine440_44k.mp3"));
+    storage.add("/48k.mp3", testing::load("sine440_48k.mp3"));
+    storage.add("/32k.mp3", testing::load("sine440_32k.mp3"));
+    storage.add("/4s.mp3", repeated(testing::load("sine440_44k.mp3"), 4));
     storage.add("/junk.mp3", random_bytes(8192));
   }
 };
@@ -477,7 +425,7 @@ TEST_CASE("starting a track reads the tag's header, not its 500 KB cover") {
   MemoryStorage memory;
   const auto tag = testing::id3v2(3, {testing::frame(3, "APIC", testing::apic_payload("image/jpeg", testing::Bytes(500 * 1024, std::byte{1})))});
   auto data = tag;
-  testing::append(data, load("sine440_44k.mp3"));
+  testing::append(data, testing::load("sine440_44k.mp3"));
   memory.add("/cover.mp3", std::move(data));
   WatchedStorage storage{memory};
   storage.limit = tag.size();

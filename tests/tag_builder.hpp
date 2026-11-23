@@ -98,4 +98,14 @@ inline Bytes id3v1(std::string_view title, std::string_view artist, std::string_
 
 inline Bytes fake_audio(std::size_t n) { return Bytes(n, std::byte{0xaa}); }
 
+// id3v2.3 TIT2/TPE1/TALB/TRCK, then the audio: how every fixture song is built.
+inline Bytes tagged_song(std::string_view title, std::string_view artist, std::string_view album,
+                         int track, const Bytes& audio = fake_audio(16)) {
+  auto b = id3v2(3, {frame(3, "TIT2", utf8_text(title)), frame(3, "TPE1", utf8_text(artist)),
+                     frame(3, "TALB", utf8_text(album)),
+                     frame(3, "TRCK", latin1_text(std::to_string(track)))});
+  append(b, audio);
+  return b;
+}
+
 }  // namespace player::testing

@@ -5,7 +5,11 @@
 #include "core/player.hpp"
 #include "core/ui.hpp"
 #include "tests/counting_storage.hpp"
+#include "tests/fake_output.hpp"
+#include "tests/forwarding_storage.hpp"
+#include "tests/library_fixtures.hpp"
 #include "tests/tag_builder.hpp"
+#include "tests/test_data.hpp"
 
 #include <doctest.h>
 
@@ -22,8 +26,6 @@
 #include <chrono>
 #include <cstdio>
 #include <format>
-#include <fstream>
-#include <iterator>
 #include <optional>
 #include <thread>
 #include <utility>
@@ -40,50 +42,11 @@ using prism::core::Y;
 
 namespace {
 
-class FakeOutput final : public PcmOutput {
-public:
-  bool accepts(PcmFormat) const override { return true; }
-  bool start(PcmFormat, PcmRing&) override { return true; }
-  void stop() override {}
-  bool connected() const override { return true; }
-  std::uint32_t underruns() const override { return 0; }
-  void set_volume(float v) override { volume = v; }
-  float volume = -1;
-};
-
-Bytes load(std::string_view name) {
-  std::ifstream in{std::string{TEST_DATA_DIR} + "/" + std::string{name}, std::ios::binary};
-  REQUIRE(in);
-  std::vector<char> chars{std::istreambuf_iterator<char>{in}, {}};
-  const auto* p = reinterpret_cast<const std::byte*>(chars.data());
-  return {p, p + chars.size()};
-}
-
-void add_song(MemoryStorage& s, std::string path, std::string_view title, std::string_view artist,
-              std::string_view album, int track, const Bytes& audio = fake_audio(16)) {
-  auto b = id3v2(3, {frame(3, "TIT2", utf8_text(title)), frame(3, "TPE1", utf8_text(artist)),
-                     frame(3, "TALB", utf8_text(album)),
-                     frame(3, "TRCK", latin1_text(std::to_string(track)))});
-  append(b, audio);
-  s.add(std::move(path), std::move(b), 1000);
-}
-
-void fill_six(MemoryStorage& s) {
-  add_song(s, "/music/b/zeta2.mp3", "Second", "Beta Band", "Zeta", 2);
-  add_song(s, "/music/b/zeta1.mp3", "First", "Beta Band", "Zeta", 1);
-  add_song(s, "/music/b/alpha.mp3", "Only", "Beta Band", "Alpha", 1);
-  add_song(s, "/music/a/g3.mp3", "Three", "abba", "Gold", 3);
-  add_song(s, "/music/a/g1.mp3", "One", "abba", "Gold", 1);
-  add_song(s, "/music/a/g2.mp3", "Two", "abba", "Gold", 2);
-}
-
 // 10,000 songs, "Song 00000".."Song 09999", built once for the tests that need them.
 MemoryStorage& ten_thousand_songs() {
   static MemoryStorage s = [] {
     MemoryStorage m;
-    for (int n = 0; n < 10000; ++n)
-      add_song(m, std::format("/music/{:03}/{:05}.mp3", n / 10, n), std::format("Song {:05}", n),
-               std::format("Artist {:03}", n / 10), std::format("Album {:03}", n / 10), n % 10 + 1);
+    fill_generated(m, 1000, 10);
     REQUIRE(Library::build(m, "/music", [](int) { return true; }));
     return m;
   }();
@@ -151,18 +114,14 @@ std::pair<const prism::render::TextCmd*, std::optional<Rect>> text_and_clip(cons
 float right_of(Rect r) { return r.origin.x.raw() + r.extent.w.raw(); }
 
 // A card whose one file cannot be opened, the way a damaged one behaves: the listing still has it.
-class MissingFileStorage final : public Storage {
+class MissingFileStorage final : public ForwardingStorage {
 public:
-  MissingFileStorage(Storage& inner, std::string missing) : inner_(inner), missing_(std::move(missing)) {}
-  std::vector<DirEntry> list(std::string_view dir) override { return inner_.list(dir); }
+  MissingFileStorage(Storage& inner, std::string missing) : ForwardingStorage(inner), missing_(std::move(missing)) {}
   std::unique_ptr<File> open(std::string_view path) override {
     return path == missing_ ? nullptr : inner_.open(path);
   }
-  std::unique_ptr<std::ostream> create(std::string_view path) override { return inner_.create(path); }
-  bool rename(std::string_view from, std::string_view to) override { return inner_.rename(from, to); }
 
 private:
-  Storage& inner_;
   std::string missing_;
 };
 
