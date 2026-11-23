@@ -26,9 +26,6 @@ test('cover_loader', executable('test_cover_loader', files('test_cover_loader.cp
 test('folders', executable('test_folders', files('test_folders.cpp'),
   dependencies : [player_core_dep, doctest_dep]))
 
-test('shrink', executable('test_shrink', files('test_shrink.cpp'),
-  dependencies : [player_core_dep, doctest_dep]))
-
 test('ui', executable('test_ui', files('test_ui.cpp'),
   cpp_args : '-DTEST_DATA_DIR="@0@"'.format(meson.current_source_dir() / 'data'),
   dependencies : [player_core_dep, prism_raster_dep, doctest_dep]))

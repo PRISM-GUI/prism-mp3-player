@@ -19,9 +19,12 @@ std::shared_ptr<Library> build_library(Storage& storage, const std::stop_token& 
 
 }  // namespace
 
-std::shared_ptr<const prism::render::Image> decode_cover(std::span<const std::byte> bytes, int /*max_side*/) {
-  // The cap is the board's business: PRISM's decoder has no size limit and the renderer scales.
-  const auto image = prism::render::decode_image(bytes);
+std::shared_ptr<const prism::render::Image> decode_cover(std::span<const std::byte> bytes, int max_side) {
+  // PRISM's decoder scales as it decodes, so the cap costs nothing beyond the box it asks for.
+  const auto side = static_cast<float>(max_side);
+  const auto image = prism::render::decode_image(
+      bytes, {.fit = prism::core::Size{prism::core::Width{side}, prism::core::Height{side}},
+              .format = prism::render::PixelFormat::rgba8888});
   return image ? *image : nullptr;
 }
 

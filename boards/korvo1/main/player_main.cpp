@@ -9,7 +9,7 @@
 #include "band_display.hpp"
 #include "bluetooth.hpp"
 #include "buttons.hpp"
-#include "jpeg_cover.hpp"
+#include "jpeg_decoder.hpp"
 #include "library_loader.hpp"
 #include "settings_nvs.hpp"
 #include "speaker_device.hpp"
@@ -28,6 +28,7 @@
 #include "esp_timer.h"
 
 #include <prism/platform/frame_app.hpp>
+#include <prism/render/image_decoder.hpp>
 
 #include <array>
 #include <chrono>
@@ -197,15 +198,25 @@ std::thread start_poll_thread(player::Player& player) {
       });
 }
 
+// Covers come out of the registry, as rgb565 the panel reads without converting: prism-esp32's
+// JPEG engine decodes, the loader reads the tags and this asks for the size the box needs.
+std::shared_ptr<const prism::render::Image> decode_cover(std::span<const std::byte> bytes, int max_side) {
+  const auto side = static_cast<float>(max_side);
+  const auto image = prism::render::decode_image(
+      bytes, {.fit = prism::core::Size{prism::core::Width{side}, prism::core::Height{side}},
+              .format = prism::render::PixelFormat::rgb565});
+  return image ? *image : nullptr;
+}
+
 // Covers load on a low-priority thread with its stack in PSRAM: the poll thread and Bluetooth, on
-// the same core, always come first. The JPEG engine does the decode; the loader reads and shrinks.
+// the same core, always come first. The JPEG engine does the decode; the loader reads and scales.
 std::unique_ptr<player::CoverLoader> start_cover_loader(player::Storage& storage, float ui_scale) {
   const int box_px = static_cast<int>(player::PlayerUi::kCoverSide * ui_scale);
   return prism::esp32::spawn_with(
       prism::esp32::ThreadConfig{kCoverStack, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, kCoverPriority,
                                  nullptr},
       [&storage, box_px] {
-        return std::make_unique<player::CoverLoader>(storage, player::decode_jpeg_cover, box_px);
+        return std::make_unique<player::CoverLoader>(storage, decode_cover, box_px);
       });
 }
 
@@ -276,6 +287,7 @@ extern "C" void app_main() {
         [](prism::esp32::bluetooth::Remote pressed) { remote.post(button_of(pressed)); });
   static auto buttons = open_buttons();
   static auto polling = start_poll_thread(model.player);
+  prism::esp32::register_jpeg_decoder();
   static auto covers = start_cover_loader(model.storage, options.ui_scale);
   model.ui.set_cover_loader(covers.get());
   prism::platform::frame_app(*display, input, model, [card](prism::platform::FrameContext& ctx) {

@@ -12,7 +12,6 @@ set(sources
     "${root}/core/memory_storage.cpp"
     "${root}/core/mp3_decoder.cpp"
     "${root}/core/player.cpp"
-    "${root}/core/shrink.cpp"
     "${root}/core/tags.cpp"
     "${root}/core/ui.cpp"
     "${root}/core/ui_draw.cpp"
