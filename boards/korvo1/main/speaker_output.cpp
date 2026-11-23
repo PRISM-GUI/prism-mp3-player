@@ -1,16 +1,18 @@
 #include "speaker_output.hpp"
 
+#include "thread_config.hpp"
+
 #include <bsp/esp32_s31_korvo_1.h>
 #include <esp_codec_dev.h>
 #include <esp_err.h>
 #include <esp_heap_caps.h>
-#include <esp_pthread.h>
 
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <thread>
 #include <vector>
@@ -46,18 +48,13 @@ struct SpeakerOutput::Impl {
   bool quit = false;
   std::thread writer;
 
+  // Internal RAM: the writer calls the codec driver, and the render thread needs the PSRAM for its
+  // own contiguous block.
   void start_writer() {
-    esp_pthread_cfg_t previous{};
-    const bool had = esp_pthread_get_cfg(&previous) == ESP_OK;
-    esp_pthread_cfg_t cfg = had ? previous : esp_pthread_get_default_config();
-    cfg.thread_name = "spk writer";
-    cfg.stack_size = kWriterStack;
-    cfg.pin_to_core = 0;
-    cfg.stack_alloc_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-    log_failure("esp_pthread_set_cfg", esp_pthread_set_cfg(&cfg));
-    writer = std::thread([this] { run(); });
-    const esp_pthread_cfg_t restore = had ? previous : esp_pthread_get_default_config();
-    log_failure("esp_pthread_set_cfg", esp_pthread_set_cfg(&restore));
+    writer = spawn_with(
+        ThreadConfig{kWriterStack, 0, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT, std::nullopt,
+                     "spk writer"},
+        [this] { return std::thread([this] { run(); }); });
   }
 
   void shutdown() {

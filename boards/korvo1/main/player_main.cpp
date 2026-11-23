@@ -1,17 +1,20 @@
 // The player on the Korvo-1's 800x480 panel: the 320x240 screen and a touch click wheel, the
 // wheel under the screen when the board is held upright (CONFIG_PRISM_DISPLAY_ROTATION_90, as an
-// iPod Classic), beside it otherwise, as on the desktop. The MP3s are the card's, from its root down, indexed on a thread of its own; the
-// sound goes to a Bluetooth headset (bt_output.cpp) or the board's own speaker
-// (speaker_output.cpp), whichever the setting read at boot names, and is decoded on a third
-// thread. The board's MODE button is Menu, VOL+ and VOL- turn the wheel.
+// iPod Classic), beside it otherwise, as on the desktop. The MP3s are the card's, from its root
+// down, indexed on a thread of its own (library_loader.cpp); the sound goes to a Bluetooth headset
+// (bt_output.cpp) or the board's own speaker (speaker_output.cpp), whichever the setting read at
+// boot names, and is decoded on a third thread. The board's MODE button is Menu, VOL+ and VOL-
+// turn the wheel.
 
 #include "app_support.hpp"
 #include "band_display.hpp"
 #include "bt_output.hpp"
-#include "jpeg_cover.hpp"
 #include "buttons.hpp"
+#include "jpeg_cover.hpp"
+#include "library_loader.hpp"
 #include "settings_nvs.hpp"
 #include "speaker_output.hpp"
+#include "thread_config.hpp"
 #include "touch.hpp"
 
 #include "core/cover_loader.hpp"
@@ -23,7 +26,6 @@
 #include "bsp/esp32_s31_korvo_1.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
-#include "esp_pthread.h"
 #include "esp_timer.h"
 
 #include <prism/platform/frame_app.hpp>
@@ -34,7 +36,6 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -43,130 +44,13 @@
 
 namespace {
 
-constexpr std::string_view kMusicRoot = "/";  // the card's root: the music is in folders there
-constexpr std::string_view kUpdating = "Updating library…";
-constexpr std::string_view kCannotWrite = "Cannot write the library index";
-constexpr std::string_view kCannotOpen = "Cannot open the library index";
 constexpr std::string_view kNoCard = "No SD card";
 constexpr std::string_view kUnreadable = "SD card not readable (FAT32 or exFAT)";
-constexpr std::uint32_t kBuilderStack = 32768;
 constexpr std::uint32_t kPollStack = 32768;
 constexpr std::uint32_t kCoverStack = 16384;  // read_tags and the shrink loop; the engine decodes
-constexpr int kCoverPriority = 2;              // under the poll thread's 5
+constexpr int kCoverPriority = 2;             // under the poll thread's 5
 constexpr std::chrono::milliseconds kPollEvery{5};
 constexpr std::int64_t kStatusEveryUs = 5'000'000;
-
-// What the builder thread found of the card: the index it was given is current, a new one waits
-// at .prism-library.new, or none could be written.
-enum class BuildResult { current, staged, failed };
-
-// What the builder thread leaves for the logic thread, merged until it takes it.
-struct Handover {
-  bool updating = false;
-  std::optional<BuildResult> built;
-};
-
-// Builds the card's index off the logic thread and hands it over. The logic thread opens the
-// index and owns it throughout; the builder gets a plain pointer to ask is_current() (which
-// reads only the fingerprint the Library holds, never its file) and holds no Library of its own.
-class LibraryLoader {
-public:
-  explicit LibraryLoader(player::Storage& storage) : storage_(storage) {}
-  ~LibraryLoader() {
-    if (thread_.joinable()) thread_.join();  // a std::thread must be joined before it dies
-  }
-
-  // Each logic loop: the first opens and shows the index and starts the builder, then what the
-  // builder left is applied.
-  void pump(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown) {
-    if (!thread_.joinable()) begin(ui, shown);
-    auto handover = take();
-    if (!handover) return;
-    if (handover->updating) ui.set_library_status(std::string{kUpdating});
-    if (handover->built) apply(ui, shown, *handover->built);
-  }
-
-private:
-  // The index the card has today shows at once, even stale: the old one stays usable while the
-  // builder makes a new one.
-  void begin(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown) {
-    shown = player::Library::open(storage_, kMusicRoot);
-    ui.set_library(shown.get());
-    start(shown.get());
-  }
-
-  // The builder's stack goes to PSRAM, as the logic thread's does: internal RAM is for the
-  // render thread's 48 KB stack and the bands. The config it sets is the logic thread's own,
-  // and threads it creates later would inherit it: put the previous one back.
-  void start(const player::Library* index) {
-    esp_pthread_cfg_t previous{};
-    if (esp_pthread_get_cfg(&previous) != ESP_OK) previous = esp_pthread_get_default_config();
-    esp_pthread_cfg_t cfg = previous;
-    cfg.stack_size = kBuilderStack;
-    cfg.pin_to_core = 0;
-    cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    esp_pthread_set_cfg(&cfg);
-    thread_ = std::thread([this, index] { build(index); });
-    esp_pthread_set_cfg(&previous);
-  }
-
-  void build(const player::Library* index) {
-    if (index && index->is_current(storage_, kMusicRoot))
-      return post(Handover{false, BuildResult::current});
-    post(Handover{true, std::nullopt});
-    // simplify: no cancellation: the run ends only with the board.
-    const bool staged = player::Library::build(storage_, kMusicRoot, [](int) { return true; },
-                                               player::Library::Install::staged);
-    post(Handover{false, staged ? BuildResult::staged : BuildResult::failed});
-  }
-
-  // Where the hand-over lands, on the logic thread.
-  void apply(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown, BuildResult result) {
-    if (result == BuildResult::current) return;
-    if (result == BuildResult::failed) return ui.set_library_status(std::string{kCannotWrite});
-    install(ui, shown);
-  }
-
-  // FatFS cannot replace an index that is open: the UI stops showing the old one, its Library
-  // closes it, and only then may the staged file take its place.
-  void install(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown) {
-    ui.set_library(nullptr);
-    shown.reset();
-    if (!player::Library::install(storage_, kMusicRoot))
-      return ui.set_library_status(std::string{kCannotWrite});
-    show(ui, shown);
-  }
-
-  void show(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown) {
-    auto fresh = player::Library::open(storage_, kMusicRoot);
-    if (!fresh) return ui.set_library_status(std::string{kCannotOpen});
-    ui.set_library(fresh.get());
-    shown = std::move(fresh);
-    korvo1::print_internal_heap("after library");
-  }
-
-  void post(Handover next) {
-    const std::lock_guard lock(mutex_);
-    if (!handover_) {
-      handover_ = next;
-      return;
-    }
-    handover_->updating = handover_->updating || next.updating;
-    if (next.built) handover_->built = next.built;
-  }
-
-  std::optional<Handover> take() {
-    const std::lock_guard lock(mutex_);
-    std::optional<Handover> out;
-    out.swap(handover_);
-    return out;
-  }
-
-  player::Storage& storage_;
-  std::thread thread_;
-  std::mutex mutex_;
-  std::optional<Handover> handover_;  // guarded by mutex_: written on the builder thread
-};
 
 // The output the boot setting names: a Bluetooth headset, or the board's own speaker. One for the
 // session, built at boot; Settings saves a change for the next start rather than swapping the
@@ -198,7 +82,7 @@ struct PlayerModel {
   std::shared_ptr<player::Library> library;
   player::PlayerUi ui{nullptr, player};
   player::WheelWidget wheel{ui};
-  LibraryLoader loader{storage};
+  player::LibraryLoader loader{storage};
   prism::core::Size frame{};  // the display in layout units, set before the runtime starts
 
   void view(prism::app::ViewBuilder& vb) {
@@ -290,38 +174,29 @@ private:
 // PSRAM, so nothing the user does waits for a decode. The board never shuts down, so this loop ends
 // with it and is never joined.
 std::thread start_poll_thread(player::Player& player) {
-  esp_pthread_cfg_t previous{};
-  if (esp_pthread_get_cfg(&previous) != ESP_OK) previous = esp_pthread_get_default_config();
-  esp_pthread_cfg_t cfg = previous;
-  cfg.stack_size = kPollStack;
-  cfg.pin_to_core = 0;
-  cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-  esp_pthread_set_cfg(&cfg);
-  std::thread thread{[&player] {
-    for (;;) {
-      player.poll();
-      std::this_thread::sleep_for(kPollEvery);
-    }
-  }};
-  esp_pthread_set_cfg(&previous);  // the config is the creating thread's own
-  return thread;
+  return player::spawn_with(
+      player::ThreadConfig{kPollStack, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, std::nullopt,
+                           nullptr},
+      [&player] {
+        return std::thread([&player] {
+          for (;;) {
+            player.poll();
+            std::this_thread::sleep_for(kPollEvery);
+          }
+        });
+      });
 }
 
 // Covers load on a low-priority thread with its stack in PSRAM: the poll thread and Bluetooth, on
 // the same core, always come first. The JPEG engine does the decode; the loader reads and shrinks.
 std::unique_ptr<player::CoverLoader> start_cover_loader(player::Storage& storage, float ui_scale) {
-  esp_pthread_cfg_t previous{};
-  if (esp_pthread_get_cfg(&previous) != ESP_OK) previous = esp_pthread_get_default_config();
-  esp_pthread_cfg_t cfg = previous;
-  cfg.stack_size = kCoverStack;
-  cfg.prio = kCoverPriority;
-  cfg.pin_to_core = 0;
-  cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-  esp_pthread_set_cfg(&cfg);
   const int box_px = static_cast<int>(player::PlayerUi::kCoverSide * ui_scale);
-  auto loader = std::make_unique<player::CoverLoader>(storage, player::decode_jpeg_cover, box_px);
-  esp_pthread_set_cfg(&previous);
-  return loader;
+  return player::spawn_with(
+      player::ThreadConfig{kCoverStack, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, kCoverPriority,
+                           nullptr},
+      [&storage, box_px] {
+        return std::make_unique<player::CoverLoader>(storage, player::decode_jpeg_cover, box_px);
+      });
 }
 
 const char* state_name(player::Player::Status::State state) {
@@ -357,6 +232,17 @@ void show_bluetooth(player::PlayerUi& ui, const player::BtOutput& radio) {
   ui.set_bluetooth_text(radio.state_text());
 }
 
+// Settings → Output lists the outputs in OutputChoice order, so the index in the list is the byte
+// stored; a change is saved for the next start, never applied under the decoder.
+void wire_settings(PlayerModel& model) {
+  model.ui.settings.outputs = {"Bluetooth", "Speaker"};
+  model.ui.settings.output = static_cast<std::size_t>(model.outputs.choice);
+  model.ui.on_output_changed([](std::size_t choice) {
+    player::save_output_choice(static_cast<player::OutputChoice>(choice));
+    std::printf("player: output %zu saved for the next start\n", choice);
+  });
+}
+
 }  // namespace
 
 extern "C" void app_main() {
@@ -370,13 +256,7 @@ extern "C" void app_main() {
   static RemoteButtons remote;
   const auto options = korvo1::pinned_threads();
   model.frame = layout_frame(display->size(), options.ui_scale);
-  // In OutputChoice order: the index in the list is the stored byte.
-  model.ui.settings.outputs = {"Bluetooth", "Speaker"};
-  model.ui.settings.output = static_cast<std::size_t>(model.outputs.choice);
-  model.ui.on_output_changed([](std::size_t choice) {
-    player::save_output_choice(static_cast<player::OutputChoice>(choice));
-    std::printf("player: output %zu saved for the next start\n", choice);
-  });
+  wire_settings(model);
   if (!card) model.ui.set_library_status(std::string{card_problem});
   else model.ui.set_storage(&model.storage);  // Folders browses the card with or without an index
   model.ui.poll_on_tick(false);  // the poll thread does that now

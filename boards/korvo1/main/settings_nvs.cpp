@@ -18,9 +18,9 @@ void log_failure(const char* call, esp_err_t err) {
   if (err != ESP_OK) std::printf("settings: %s failed: %s\n", call, esp_err_to_name(err));
 }
 
-// Bluetooth's bring-up initialises NVS too and nvs_flash_init() is idempotent; with the speaker
-// chosen this is the only caller, and a partition from another version needs the erase.
-bool open_flash() {
+}  // namespace
+
+bool init_nvs() {
   auto err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     log_failure("nvs_flash_erase", nvs_flash_erase());
@@ -30,10 +30,8 @@ bool open_flash() {
   return err == ESP_OK;
 }
 
-}  // namespace
-
 OutputChoice load_output_choice() {
-  if (!open_flash()) return kFallback;
+  if (!init_nvs()) return kFallback;
   nvs_handle_t handle{};
   if (const auto err = nvs_open(kNamespace, NVS_READONLY, &handle); err != ESP_OK) {
     log_failure("nvs_open", err);
@@ -51,7 +49,7 @@ OutputChoice load_output_choice() {
 }
 
 void save_output_choice(OutputChoice choice) {
-  if (!open_flash()) return;
+  if (!init_nvs()) return;
   nvs_handle_t handle{};
   if (const auto err = nvs_open(kNamespace, NVS_READWRITE, &handle); err != ESP_OK) {
     log_failure("nvs_open", err);
