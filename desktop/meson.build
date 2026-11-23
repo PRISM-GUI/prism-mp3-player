@@ -1,6 +1,6 @@
 player_desktop_dep = declare_dependency(dependencies : player_core_dep)
 
-player_desktop_app_lib = static_library('player_desktop_app', files('desktop_app.cpp', 'sdl_pcm_output.cpp'),
+player_desktop_app_lib = static_library('player_desktop_app', files('desktop_app.cpp'),
   dependencies : [player_desktop_dep, prism_dep],
 )
 player_desktop_app_dep = declare_dependency(link_with : player_desktop_app_lib,

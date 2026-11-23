@@ -5,7 +5,6 @@
 #include "core/player.hpp"
 #include "core/ui.hpp"
 #include "tests/counting_storage.hpp"
-#include "tests/fake_output.hpp"
 #include "tests/forwarding_storage.hpp"
 #include "tests/library_fixtures.hpp"
 #include "tests/tag_builder.hpp"
@@ -14,6 +13,7 @@
 #include <doctest.h>
 
 #include <prism/app/widget_tree.hpp>
+#include <prism/audio/manual_device.hpp>
 #include <prism/raster/canvas.hpp>
 #include <prism/raster/draw_snapshot.hpp>
 #include <prism/raster/fonts.hpp>
@@ -128,8 +128,8 @@ private:
 struct Six {
   MemoryStorage memory;
   CountingStorage storage{memory};
-  FakeOutput out;
-  Player player{storage, out};
+  prism::audio::ManualDevice out;
+  Player player{storage, "manual"};
   std::unique_ptr<Library> library;
   Six() {
     fill_six(memory);
@@ -226,8 +226,8 @@ TEST_CASE("Folders lists subfolders then mp3 files, sorted, skipping system fold
   s.add("/Album/$RECYCLE.BIN/junk.mp3", fake_audio(16));
   s.add("/Album/.hidden.mp3", fake_audio(16));
   s.add("/Album/notes.txt", fake_audio(16));
-  FakeOutput out;
-  Player player{s, out};
+  prism::audio::ManualDevice out;
+  Player player{s, "manual"};
   PlayerUi ui{nullptr, player};
   ui.set_storage(&s);
 
@@ -246,8 +246,8 @@ TEST_CASE("Select enters a folder; Menu goes back and keeps the selection") {
   s.add("/Album/x.mp3", fake_audio(16));
   s.add("/Best/y.mp3", fake_audio(16));
   s.add("/a.mp3", fake_audio(16));
-  FakeOutput out;
-  Player player{s, out};
+  prism::audio::ManualDevice out;
+  Player player{s, "manual"};
   PlayerUi ui{nullptr, player};
   ui.set_storage(&s);
 
@@ -270,8 +270,8 @@ TEST_CASE("Select on a file plays its folder from that file") {
   add_song(s, "/Album/b.mp3", "B", "Band", "Disc", 2, sine);
   add_song(s, "/Album/c.mp3", "C", "Band", "Disc", 3, sine);
   add_song(s, "/Album/Sub/d.mp3", "D", "Band", "Disc", 4, sine);
-  FakeOutput out;
-  Player player{s, out};
+  prism::audio::ManualDevice out;
+  Player player{s, "manual"};
   PlayerUi ui{nullptr, player};
   ui.set_storage(&s);
 
@@ -294,8 +294,8 @@ TEST_CASE("a folder of 2,000 files queues a window around the selected file") {
     add_song(memory, std::format("/huge/{:04}.mp3", n), std::format("Track {:04}", n), "Band", "Huge", n + 1,
              n == 1000 ? sine : fake_audio(16));
   CountingStorage s{memory};
-  FakeOutput out;
-  Player player{s, out};
+  prism::audio::ManualDevice out;
+  Player player{s, "manual"};
   PlayerUi ui{nullptr, player};
   ui.set_storage(&s);
 
@@ -328,8 +328,8 @@ TEST_CASE("a folder row shows the chevron; a file row does not") {
   s.add("/Album/x.mp3", fake_audio(16));
   s.add("/Best/y.mp3", fake_audio(16));
   s.add("/a.mp3", fake_audio(16));
-  FakeOutput out;
-  Player player{s, out};
+  prism::audio::ManualDevice out;
+  Player player{s, "manual"};
   PlayerUi ui{nullptr, player};
   ui.set_storage(&s);
   press(ui, {Button::Select, Button::Select});  // Music → Folders: Album/, Best/, a.mp3
@@ -366,8 +366,8 @@ TEST_CASE("a folder row shows the chevron; a file row does not") {
 
 TEST_CASE("with a card but no library, Music shows Folders and why there is no music") {
   MemoryStorage s;
-  FakeOutput out;
-  Player player{s, out};
+  prism::audio::ManualDevice out;
+  Player player{s, "manual"};
   PlayerUi ui{nullptr, player};
   ui.set_storage(&s);
   press(ui, {Button::Select});
@@ -387,8 +387,8 @@ TEST_CASE("a file that cannot be opened keeps its place in the queue") {
   add_song(memory, "/Album/b.mp3", "B", "Band", "Album", 2, sine);
   add_song(memory, "/Album/c.mp3", "C", "Band", "Album", 3, sine);
   MissingFileStorage s{memory, "/Album/a.mp3"};
-  FakeOutput out;
-  Player player{s, out};
+  prism::audio::ManualDevice out;
+  Player player{s, "manual"};
   PlayerUi ui{nullptr, player};
   ui.set_storage(&s);
 
@@ -416,8 +416,8 @@ TEST_CASE("10,000 songs: 9,999 steps reach the last song and only visible rows w
   CountingStorage storage{ten_thousand_songs()};
   const auto library = open_library(storage);
   const auto index_size = storage.bytes_read;
-  FakeOutput out;
-  Player player{storage, out};
+  prism::audio::ManualDevice out;
+  Player player{storage, "manual"};
   PlayerUi ui{library.get(), player};
   press(ui, {Button::Select, Rotate{3}, Button::Select});
   REQUIRE(ui.screen_title() == "Songs");
@@ -438,8 +438,8 @@ TEST_CASE("10,000 songs: 9,999 steps reach the last song and only visible rows w
 TEST_CASE("a taller screen fills its height with rows, and scrolls by what it shows") {
   CountingStorage storage{ten_thousand_songs()};
   const auto library = open_library(storage);
-  FakeOutput out;
-  Player player{storage, out};
+  prism::audio::ManualDevice out;
+  Player player{storage, "manual"};
   PlayerUi ui{library.get(), player};
   press(ui, {Button::Select, Rotate{3}, Button::Select});
   REQUIRE(ui.screen_title() == "Songs");
@@ -460,8 +460,8 @@ TEST_CASE("a taller screen fills its height with rows, and scrolls by what it sh
 TEST_CASE("a screen drawn shorter keeps the selected row on it") {
   CountingStorage storage{ten_thousand_songs()};
   const auto library = open_library(storage);
-  FakeOutput out;
-  Player player{storage, out};
+  prism::audio::ManualDevice out;
+  Player player{storage, "manual"};
   PlayerUi ui{library.get(), player};
   press(ui, {Button::Select, Rotate{3}, Button::Select});
   const float tall = PlayerUi::kTitleHeight + 11 * PlayerUi::kRowHeight;
@@ -485,8 +485,8 @@ TEST_CASE("Select on a song plays the album from that song") {
 TEST_CASE("Select in Songs queues 500 songs, up to 250 of them before the selected one") {
   CountingStorage storage{ten_thousand_songs()};
   const auto library = open_library(storage);
-  FakeOutput out;
-  Player player{storage, out};
+  prism::audio::ManualDevice out;
+  Player player{storage, "manual"};
   PlayerUi ui{library.get(), player};
   press(ui, {Button::Select, Rotate{3}, Button::Select, Rotate{100}});
   storage.opened.clear();
@@ -505,8 +505,8 @@ TEST_CASE("Select in a 2,000-song album queues 500 songs around the selected one
     add_song(memory, std::format("/music/huge/{:04}.mp3", n), std::format("Track {:04}", n), "Band", "Huge", n + 1, sine);
   REQUIRE(Library::build(memory, "/music", [](int) { return true; }));
   const auto library = open_library(memory);
-  FakeOutput out;
-  Player player{memory, out};
+  prism::audio::ManualDevice out;
+  Player player{memory, "manual"};
   PlayerUi ui{library.get(), player};
   press(ui, {Button::Select, Rotate{2}, Button::Select, Button::Select, Rotate{1000}});
   REQUIRE(ui.screen_title() == "Huge");
@@ -525,8 +525,8 @@ TEST_CASE("Previous from the 5th song of a 12-song album plays the 4th") {
     add_song(memory, std::format("/music/twelve/{:02}.mp3", n), std::format("Track {:02}", n), "Band", "Twelve", n, sine);
   REQUIRE(Library::build(memory, "/music", [](int) { return true; }));
   const auto library = open_library(memory);
-  FakeOutput out;
-  Player player{memory, out};
+  prism::audio::ManualDevice out;
+  Player player{memory, "manual"};
   PlayerUi ui{library.get(), player};
   press(ui, {Button::Select, Rotate{2}, Button::Select, Button::Select, Rotate{4}, Button::Select});
   REQUIRE(ui.screen_title() == "Now Playing");
@@ -538,8 +538,8 @@ TEST_CASE("Previous from the 5th song of a 12-song album plays the 4th") {
 
 TEST_CASE("no library: the Music screen says No music") {
   MemoryStorage s;
-  FakeOutput out;
-  Player player{s, out};
+  prism::audio::ManualDevice out;
+  Player player{s, "manual"};
   PlayerUi ui{nullptr, player};
   press(ui, {Button::Select});
   CHECK(ui.screen_title() == "Music");
@@ -552,8 +552,8 @@ TEST_CASE("an empty card's library: the Music screen says No music") {
   MemoryStorage s;
   REQUIRE(Library::build(s, "/music", [](int) { return true; }));
   const auto library = open_library(s);
-  FakeOutput out;
-  Player player{s, out};
+  prism::audio::ManualDevice out;
+  Player player{s, "manual"};
   PlayerUi ui{library.get(), player};
   press(ui, {Button::Select});
   CHECK(ui.screen_title() == "Music");
@@ -565,8 +565,8 @@ TEST_CASE("an empty card's library: the Music screen says No music") {
 
 TEST_CASE("while the library is built, the Music screen says so instead of No music") {
   MemoryStorage s;
-  FakeOutput out;
-  Player player{s, out};
+  prism::audio::ManualDevice out;
+  Player player{s, "manual"};
   PlayerUi ui{nullptr, player};
   ui.set_library_status("Updating library…");
   press(ui, {Button::Select});
@@ -613,9 +613,9 @@ TEST_CASE("in Now Playing, the wheel sets the volume by 5% a step") {
   press(ui, {Rotate{1}, Button::Select});
   REQUIRE(ui.screen_title() == "Now Playing");
   press(ui, {Rotate{2}});
-  CHECK(f.out.volume == doctest::Approx(0.6));
+  CHECK(f.player.volume() == doctest::Approx(0.6));
   press(ui, {Rotate{-20}});
-  CHECK(f.out.volume == doctest::Approx(0.0));
+  CHECK(f.player.volume() == doctest::Approx(0.0));
 }
 
 TEST_CASE("drawing a list highlights the selected row") {
@@ -692,8 +692,8 @@ TEST_CASE("a very long title is cut before the battery") {
   add_song(s, "/music/x.mp3", "Song", "Someone", album, 1);
   REQUIRE(Library::build(s, "/music", [](int) { return true; }));
   const auto library = open_library(s);
-  FakeOutput out;
-  Player player{s, out};
+  prism::audio::ManualDevice out;
+  Player player{s, "manual"};
   PlayerUi ui{library.get(), player};
   press(ui, {Button::Select, Rotate{2}, Button::Select, Button::Select});
   REQUIRE(ui.screen_title() == album);
@@ -709,8 +709,8 @@ TEST_CASE("the remaining time ends at the progress bar's right edge") {
   add_song(s, "/music/sine.mp3", "Sine", "Tone", "Tests", 1, load("sine440_44k.mp3"));
   REQUIRE(Library::build(s, "/music", [](int) { return true; }));
   const auto library = open_library(s);
-  FakeOutput out;
-  Player player{s, out};
+  prism::audio::ManualDevice out;
+  Player player{s, "manual"};
   PlayerUi ui{library.get(), player};
   press(ui, {Button::Select, Rotate{3}, Button::Select, Button::Select});
   REQUIRE(ui.screen_title() == "Now Playing");
@@ -773,8 +773,8 @@ TEST_CASE("Now Playing draws the track's cover once loaded, the placeholder befo
   s.add("/music/a.mp3", std::move(body), 1000);
   REQUIRE(Library::build(s, "/music", [](int) { return true; }));
   const auto library = open_library(s);
-  FakeOutput out;
-  Player player{s, out};
+  prism::audio::ManualDevice out;
+  Player player{s, "manual"};
   PlayerUi ui{library.get(), player};
   CoverLoader loader{
       s, [](std::span<const std::byte>, int) { return some_cover(); }, 100};
@@ -808,8 +808,8 @@ TEST_CASE("an untagged file played from Folders is titled by its file name") {
   // next track and the title under test would never be the one playing.
   storage.add("/Album/song.mp3", load("sine440_44k.mp3"), 1000);
   add_song(storage, "/Album/tagged.mp3", "Tagged", "abba", "Gold", 1, load("sine440_44k.mp3"));
-  FakeOutput out;
-  Player player{storage, out};
+  prism::audio::ManualDevice out;
+  Player player{storage, "manual"};
   PlayerUi ui{nullptr, player};
   ui.set_storage(&storage);
   // Music → Folders → Card → Album → song.mp3
@@ -835,8 +835,8 @@ bool marker_on_bar(const prism::render::DrawList& dl) {
 // A playing 4 s track on Now Playing, reached without a library: Main row 1 is Now Playing.
 struct Scrubber {
   MemoryStorage memory;
-  FakeOutput out;
-  Player player{memory, out};
+  prism::audio::ManualDevice out;
+  Player player{memory, "manual"};
   PlayerUi ui{nullptr, player};
 
   Scrubber() {
@@ -856,26 +856,26 @@ struct Scrubber {
 TEST_CASE("Select in Now Playing enters scrub mode: the wheel seeks 5 s a step instead of the volume") {
   Scrubber s;
   REQUIRE(s.player.status().state == Player::Status::State::Playing);
-  const auto volume = s.out.volume;
+  const auto volume = s.player.volume();
   press(s.ui, {Button::Select});  // scrub mode on
   press(s.ui, {Rotate{1}});       // one step forward: 5 s into a 20 s track
   CHECK(s.position() > PlayerUi::kScrubStep.count() - 0.5);
   CHECK(s.position() < PlayerUi::kScrubStep.count() + 0.5);
-  CHECK(s.out.volume == volume);  // and the wheel did not touch the volume
+  CHECK(s.player.volume() == volume);  // and the wheel did not touch the volume
   press(s.ui, {Rotate{-1}});      // one step back, to the start
   CHECK(s.position() < 0.5);
 }
 
 TEST_CASE("Menu leaves scrub mode and stays in Now Playing") {
   Scrubber s;
-  const auto volume = s.out.volume;
+  const auto volume = s.player.volume();
   press(s.ui, {Button::Select});  // scrub mode on
   press(s.ui, {Rotate{1}});       // seeks
   CHECK(s.position() > PlayerUi::kScrubStep.count() - 0.5);
   press(s.ui, {Button::Menu});  // leaves scrub mode, not the screen
   CHECK(s.ui.screen_title() == "Now Playing");
   press(s.ui, {Rotate{1}});  // the wheel is the volume again
-  CHECK(s.out.volume != volume);
+  CHECK(s.player.volume() != volume);
   press(s.ui, {Button::Menu});  // a second Menu goes back as it always did
   CHECK(s.ui.screen_title() == "Player");
 }
@@ -889,9 +889,9 @@ TEST_CASE("scrub mode ends by itself after 3 s without a step") {
   CHECK(s.position() > PlayerUi::kScrubStep.count() - 0.5);
   now += PlayerUi::kScrubIdle.count() + 1.0;
   s.ui.tick();  // notices the idle time and leaves scrub mode
-  const auto volume = s.out.volume;
+  const auto volume = s.player.volume();
   press(s.ui, {Rotate{1}});
-  CHECK(s.out.volume != volume);  // the wheel is the volume again
+  CHECK(s.player.volume() != volume);  // the wheel is the volume again
 }
 
 TEST_CASE("scrub mode draws the marker on the progress bar") {

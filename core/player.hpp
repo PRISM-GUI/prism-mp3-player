@@ -5,26 +5,35 @@
 #include "core/pcm_ring.hpp"
 #include "core/storage.hpp"
 
+#include <cstdint>
 #include <deque>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
+
+namespace prism::audio {
+class Output;
+}
 
 namespace player {
 
-// Plays a queue of tracks into a PcmOutput. Its methods may be called from more than one thread
-// (the UI's logic thread and the audio thread that runs poll()): each one takes an internal lock,
-// and poll() decodes only a few frames per call so the UI never waits long for it. Only the ring
-// is shared with the output's own thread, and it is lock-free for that.
+// Plays a queue of tracks into a prism::audio::Output it opens on the device it was given: the
+// platform's default device when the id is empty. Its methods may be called from more than one
+// thread (the UI's logic thread and the audio thread that runs poll()): each one takes an internal
+// lock, and poll() decodes only a few frames per call so the UI never waits long for it. Only the
+// ring is shared with the Output's own thread, and it is lock-free for that.
 // The thread that runs poll() must be joined before the Player goes: ~Player takes the lock and
-// stops the output, whose ring dies with us.
-// Tracks of the same format follow each other in the ring with no gap and no output restart.
+// destroys the Output, whose pull reads the ring.
+// Tracks of the same format follow each other in the ring with no gap and no Output restart.
 class Player {
 public:
-  Player(Storage& storage, PcmOutput& output) : storage_(storage), output_(output) {}
-  ~Player();  // the output reads our ring: it stops before the ring goes
+  // Out of line, as the destructor: both need the complete Output to destroy it.
+  explicit Player(Storage& storage, std::string device_id = {});
+  ~Player();  // the Output reads our ring: it goes before the ring does
   Player(const Player&) = delete;
   Player& operator=(const Player&) = delete;
 
@@ -36,9 +45,12 @@ public:
   // there. Does nothing when stopped, and a paused player stays paused — even when the seek runs the
   // track out, the next track is opened and held, not started.
   void seek(Seconds at);
-  void set_volume(float volume);  // 0..1
+  void set_volume(float volume);  // 0..1; the next Output opens with it
+  float volume() const;           // what set_volume last took
   // Reads, decodes, refills the ring, handles the end of a track and a disconnect.
   void poll();
+  // What the ring has played dry of: the count belongs to the ring, so it survives an Output going.
+  std::uint32_t underruns() const;
 
   struct Status {
     enum class State { Stopped, Playing, Paused } state;
@@ -68,6 +80,11 @@ private:
                 Then then = Then::play);
   void start_output();
   void pause_disconnected();
+  // Can the device we were given play `format`? A device nobody lists is given the benefit of the
+  // doubt: its Output then reports itself lost, which pauses the player with the disconnect message.
+  bool accepts(PcmFormat format) const;
+  // No Output yet counts as connected: a track has not started, so nothing is wrong.
+  bool connected() const;
   std::string open_track(std::size_t index, Seconds at = Seconds{0});
   // Decodes at most `max_mp3_frames` MP3 frames; the whole ring's worth unless told otherwise.
   void fill_ring(std::size_t max_mp3_frames = kWholeRing);
@@ -79,11 +96,14 @@ private:
   Seconds position() const;
 
   Storage& storage_;
-  PcmOutput& output_;
+  std::string device_id_;  // what each Output opens on; empty means the platform's default device
   // Guards every member below: the UI's thread and the audio thread both call in.
   mutable std::mutex mutex_;
-  // Read by the output's thread without the lock, by design.
+  // Read by the Output's thread without the lock, by design.
   PcmRing ring_{static_cast<std::size_t>(samples_at(kRingSeconds, PcmFormat{kRate48k, 2}))};
+  float volume_ = 1.0f;  // remembered here, so the next Output opens at it
+  // The sink for the current track, declared after the ring so it dies first; ~Player resets it.
+  std::unique_ptr<prism::audio::Output> output_;
   std::vector<TrackRow> queue_;
   Status::State state_ = Status::State::Stopped;
   Track current_;

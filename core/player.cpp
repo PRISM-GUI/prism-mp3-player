@@ -3,8 +3,12 @@
 #include "core/path.hpp"
 #include "core/tags.hpp"
 
+#include <prism/audio/backend.hpp>
+#include <prism/audio/output.hpp>
+
 #include <algorithm>
 #include <format>
+#include <span>
 
 namespace player {
 namespace {
@@ -19,9 +23,12 @@ constexpr std::size_t kMp3FramesPerPoll = 8;
 
 using State = Player::Status::State;
 
+Player::Player(Storage& storage, std::string device_id)
+    : storage_(storage), device_id_(std::move(device_id)) {}
+
 Player::~Player() {
   const std::lock_guard lock(mutex_);
-  output_.stop();
+  output_.reset();
 }
 
 void Player::play(std::vector<TrackRow> tracks, std::size_t index) {
@@ -44,7 +51,9 @@ void Player::toggle_pause() {
   const std::lock_guard lock(mutex_);
   switch (state_) {
     case State::Playing:
-      output_.stop();
+      // Destroying the Output is the stop: it takes its pull away before returning, and the ring
+      // keeps what it holds, so resuming picks up where it stopped.
+      output_.reset();
       state_ = State::Paused;
       break;
     case State::Paused:
@@ -59,13 +68,24 @@ void Player::toggle_pause() {
 
 void Player::set_volume(float volume) {
   const std::lock_guard lock(mutex_);
-  output_.set_volume(std::clamp(volume, 0.0f, 1.0f));
+  volume_ = std::clamp(volume, 0.0f, 1.0f);
+  if (output_) output_->set_volume(volume_);
+}
+
+float Player::volume() const {
+  const std::lock_guard lock(mutex_);
+  return volume_;
+}
+
+std::uint32_t Player::underruns() const {
+  const std::lock_guard lock(mutex_);
+  return ring_.underruns();
 }
 
 void Player::poll() {
   const std::lock_guard lock(mutex_);
   if (state_ != State::Playing) return;
-  if (!output_.connected()) return pause_disconnected();
+  if (!connected()) return pause_disconnected();
   fill_ring(kMp3FramesPerPoll);
   promote_played_tracks();
   // Reached only when the queue ends or the next track's format differs: the ring drained.
@@ -119,20 +139,39 @@ void Player::start_at(std::size_t index, std::size_t max_mp3_frames, Then then) 
 }
 
 void Player::start_output() {
-  if (!output_.connected()) return pause_disconnected();
-  if (!output_.start(format_, ring_)) {
-    halt();
-    state_ = State::Stopped;
-    message_ = std::format("Output refused {} Hz", format_.sample_rate);
-    return;
+  const prism::audio::Format wanted{.sample_rate = format_.sample_rate, .channels = format_.channels};
+  // The Output pulls this on its own thread; pop() pads silence when the ring runs dry.
+  auto render = prism::audio::SampleRenderFn<std::int16_t>{
+      [this](std::span<std::int16_t> block) { ring_.pop(block); }};
+  if (device_id_.empty()) {
+    output_ = std::make_unique<prism::audio::Output>(wanted, render);
+  } else {
+    output_ = std::make_unique<prism::audio::Output>(device_id_, wanted, render);
   }
+  output_->set_volume(volume_);
+  if (output_->state() == prism::audio::State::lost) return pause_disconnected();
   state_ = State::Playing;
 }
 
 void Player::pause_disconnected() {
-  output_.stop();
+  output_.reset();
   state_ = State::Paused;
   message_ = "Headset disconnected";
+}
+
+bool Player::accepts(PcmFormat format) const {
+  const prism::audio::Format wanted{.sample_rate = format.sample_rate, .channels = format.channels};
+  for (const auto& device : prism::audio::devices()) {
+    if (device_id_.empty() ? device.is_default : device.id == device_id_) {
+      return device.accepts(wanted);
+    }
+  }
+  // Nobody lists it: the Output will say it is lost, and playback pauses there rather than here.
+  return true;
+}
+
+bool Player::connected() const {
+  return !output_ || output_->state() != prism::audio::State::lost;
 }
 
 // Opens the track into decoder_ and decodes its first frame into first_frame_; returns why it
@@ -148,7 +187,7 @@ std::string Player::open_track(std::size_t index, Seconds at) {
   if (first_frame_.empty()) return std::format("Cannot decode {}", file_name(path));
   const auto hz = decoder_->format().sample_rate;
   if (!supported_rate(hz)) return std::format("Unsupported sample rate {} Hz", hz);
-  if (!output_.accepts(decoder_->format())) return std::format("Output cannot play {} Hz", hz);
+  if (!accepts(decoder_->format())) return std::format("Output cannot play {} Hz", hz);
   if (at <= Seconds{0}) return {};
   // simplify: the byte is proportional to the time, which is exact only for a constant bitrate
   // (VBR heads closer or further off the mark). Upgrade: the Xing header's 100-entry TOC.
@@ -207,7 +246,7 @@ void Player::promote_played_tracks() {
 }
 
 void Player::halt() {
-  output_.stop();
+  output_.reset();
   ring_.clear();
   decoder_.reset();
   queued_.clear();

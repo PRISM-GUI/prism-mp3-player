@@ -4,7 +4,6 @@
 #include "core/player.hpp"
 #include "core/ui.hpp"
 #include "core/dir_storage.hpp"
-#include "desktop/sdl_pcm_output.hpp"
 
 #include <prism/input/input_event.hpp>
 #include <prism/render/image_decoder.hpp>
@@ -48,8 +47,7 @@ public:
   void view(prism::app::ViewBuilder&);
 
   DirStorage storage;
-  SdlPcmOutput output;
-  Player player{storage, output};
+  Player player{storage};  // the sound card PRISM's audio backend picks
   std::shared_ptr<Library> library;
   PlayerUi ui{nullptr, player};
   WheelWidget wheel{ui};
