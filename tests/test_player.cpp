@@ -645,6 +645,20 @@ TEST_CASE("seek while paused stays paused") {
   CHECK(std::abs(p.status().position_s - 1.5) < 0.1);
 }
 
+TEST_CASE("a seek past the end while paused moves to the next track, still paused") {
+  Fixture f;
+  Player p{f.storage, f.out};
+  p.play({row("/44k.mp3"), row("/48k.mp3")}, 0);
+  p.toggle_pause();
+  REQUIRE(p.status().state == State::Paused);
+  p.seek(100.0);  // past the end of the first track
+  CHECK(p.status().index == 1);
+  CHECK(p.status().state == State::Paused);  // the queue moves on, nothing starts playing
+  CHECK(p.status().position_s < 0.5);
+  REQUIRE(p.current_track().has_value());
+  CHECK(p.current_track()->path == "/48k.mp3");
+}
+
 TEST_CASE("seek when stopped does nothing") {
   Fixture f;
   Player p{f.storage, f.out};

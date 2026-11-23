@@ -33,7 +33,8 @@ public:
   void next();
   void previous();  // restarts the track if more than 3 s in, else plays the one before
   // Moves the current track to `seconds`, clamped to its duration: the ring is flushed and refilled
-  // from there. Does nothing when stopped, and a paused player stays paused. Stub until it lands.
+  // from there. Does nothing when stopped, and a paused player stays paused — even when the seek
+  // runs the track out, the next track is opened and held, not started.
   void seek(double seconds);
   void set_volume(float volume);  // 0..1
   // Reads, decodes, refills the ring, handles the end of a track and a disconnect.
@@ -61,12 +62,15 @@ private:
     std::string message;  // the status message once it plays
   };
 
-  void start_at(std::size_t index, std::size_t max_frames = std::numeric_limits<std::size_t>::max());
+  static constexpr auto kWholeRing = std::numeric_limits<std::size_t>::max();  // a frame budget
+  enum class Then { play, hold };  // after opening a track: start the output, or stay paused
+  void start_at(std::size_t index, std::size_t max_frames = kWholeRing,
+                Then then = Then::play);
   void start_output();
   void pause_disconnected();
   std::string open_track(std::size_t index, double at = 0.0);
   // Decodes at most `max_frames` frames; the whole ring's worth unless told otherwise.
-  void fill_ring(std::size_t max_frames = std::numeric_limits<std::size_t>::max());
+  void fill_ring(std::size_t max_frames = kWholeRing);
   bool chain_next();
   void push(std::span<const std::int16_t> pcm);
   void promote_played_tracks();

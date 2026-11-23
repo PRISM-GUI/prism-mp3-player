@@ -100,7 +100,7 @@ std::size_t Player::queue_size() const {
 // Starts the first playable track from `index`; each one skipped leaves its reason as the
 // message, which the next normal start clears. `max_frames` caps what this refills: the public
 // commands pass the default (a whole ring), poll() passes its own budget so the UI never waits.
-void Player::start_at(std::size_t index, std::size_t max_frames) {
+void Player::start_at(std::size_t index, std::size_t max_frames, Then then) {
   halt();
   message_.clear();
   for (; index < queue_.size(); ++index) {
@@ -112,6 +112,10 @@ void Player::start_at(std::size_t index, std::size_t max_frames) {
     current_ = {index, 0, decoder_->duration_s(), {}};
     push(first_frame_);  // a frame already decoded, so one off the budget
     fill_ring(max_frames > 0 ? max_frames - 1 : 0);
+    if (then == Then::hold) {
+      state_ = State::Paused;
+      return;
+    }
     return start_output();
   }
   decoder_.reset();
@@ -236,8 +240,10 @@ void Player::seek(double seconds) {
   const bool was_playing = state_ == State::Playing;
   halt();
   // At or past the end, or no frame left where the byte lands (an ID3v1 tag, say): the track is
-  // over, and the queue moves on as when a track plays to its end.
-  if (target >= total || !open_track(index, target).empty()) return start_at(index + 1);
+  // over, and the queue moves on as when a track plays to its end. A paused player moves on too,
+  // but it must not start playing behind a paused screen.
+  if (target >= total || !open_track(index, target).empty())
+    return start_at(index + 1, kWholeRing, was_playing ? Then::play : Then::hold);
   format_ = decoder_->format();
   current_ = {index, 0, total, {}};
   message_.clear();
