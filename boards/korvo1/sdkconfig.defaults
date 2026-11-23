@@ -43,7 +43,8 @@ CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
 CONFIG_PRISM_BAND_HEIGHT=16
 CONFIG_PRISM_UI_SCALE_PERCENT=150
 
-# Bluetooth Classic audio only, as ESP-IDF's classic_bt/a2dp_source example.
+# Bluetooth Classic audio only, as ESP-IDF's classic_bt/a2dp_source example: prism-esp32's prism_bt
+# component brings the stack up and provides the "headset" device.
 CONFIG_BT_ENABLED=y
 CONFIG_BTDM_CTRL_MODE_BLE_ONLY=n
 CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y

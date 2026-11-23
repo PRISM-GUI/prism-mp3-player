@@ -1,19 +1,18 @@
 // The player on the Korvo-1's 800x480 panel: the 320x240 screen and a touch click wheel, the
 // wheel under the screen when the board is held upright (CONFIG_PRISM_DISPLAY_ROTATION_90, as an
 // iPod Classic), beside it otherwise, as on the desktop. The MP3s are the card's, from its root
-// down, indexed on a thread of its own (library_loader.cpp); the sound goes to a Bluetooth headset
-// (bt_output.cpp) or the board's own speaker (speaker_output.cpp), whichever the setting read at
-// boot names, and is decoded on a third thread. The board's MODE button is Menu, VOL+ and VOL-
-// turn the wheel.
+// down, indexed on a thread of its own (library_loader.cpp); the sound goes out through the PRISM
+// audio device the boot setting names, prism-esp32's speaker or its A2DP headset, and is decoded on
+// a third thread. The board's MODE button is Menu, VOL+ and VOL- turn the wheel.
 
 #include "app_support.hpp"
 #include "band_display.hpp"
-#include "bt_output.hpp"
+#include "bluetooth.hpp"
 #include "buttons.hpp"
 #include "jpeg_cover.hpp"
 #include "library_loader.hpp"
 #include "settings_nvs.hpp"
-#include "speaker_output.hpp"
+#include "speaker_device.hpp"
 #include "thread_config.hpp"
 #include "touch.hpp"
 
@@ -36,6 +35,7 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -52,33 +52,33 @@ constexpr int kCoverPriority = 2;             // under the poll thread's 5
 constexpr std::chrono::milliseconds kPollEvery{5};
 constexpr std::int64_t kStatusEveryUs = 5'000'000;
 
-// The output the boot setting names: a Bluetooth headset, or the board's own speaker. One for the
-// session, built at boot; Settings saves a change for the next start rather than swapping the
-// output under the decoder.
+// The output the boot setting names, brought up once: PRISM's speaker device, or its headset device
+// with the radio, which reconnects to the headset by itself. Settings saves a change for the next
+// start rather than swapping the device under the decoder.
 struct Outputs {
   Outputs() : choice{player::load_output_choice()} {
     if (choice == player::OutputChoice::speaker)
-      speaker = std::make_unique<player::SpeakerOutput>();
+      prism::esp32::register_speaker();
     else  // powers the radio up and connects to the bonded headset, or scans
-      radio = &player::BtOutput::open();
+      prism::esp32::bluetooth::start();
   }
 
-  player::PcmOutput& get() const {
-    return radio ? static_cast<player::PcmOutput&>(*radio) : *speaker;
-  }
+  bool radio() const { return choice == player::OutputChoice::bluetooth; }
+  std::string_view id() const { return radio() ? "headset" : "speaker"; }
+  const char* name() const { return radio() ? "bluetooth" : "speaker"; }
 
-  const char* name() const { return radio ? "bluetooth" : "speaker"; }
-  std::string state_text() const { return radio ? radio->state_text() : std::string{"on"}; }
+  std::string state_text() const {
+    if (!radio()) return "on";
+    return prism::esp32::bluetooth::state_text();
+  }
 
   player::OutputChoice choice;
-  player::BtOutput* radio = nullptr;
-  std::unique_ptr<player::SpeakerOutput> speaker;
 };
 
 struct PlayerModel {
   player::DirStorage storage{BSP_SD_MOUNT_POINT};
   Outputs outputs;
-  player::Player player{storage, outputs.get()};
+  player::Player player{storage, std::string{outputs.id()}};
   std::shared_ptr<player::Library> library;
   player::PlayerUi ui{nullptr, player};
   player::WheelWidget wheel{ui};
@@ -170,13 +170,23 @@ private:
   std::vector<player::Button> queue_;  // guarded by mutex_: written on the Bluetooth task
 };
 
+// The profile's play/pause/stop all arrive as one, and the volume keys are the headset's own.
+player::Button button_of(prism::esp32::bluetooth::Remote pressed) {
+  switch (pressed) {
+    case prism::esp32::bluetooth::Remote::play_pause: return player::Button::PlayPause;
+    case prism::esp32::bluetooth::Remote::next: return player::Button::Next;
+    case prism::esp32::bluetooth::Remote::previous: return player::Button::Previous;
+  }
+  return player::Button::PlayPause;
+}
+
 // poll() decodes a few frames and refills the ring: it runs here, on core 0, with its stack in
 // PSRAM, so nothing the user does waits for a decode. The board never shuts down, so this loop ends
 // with it and is never joined.
 std::thread start_poll_thread(player::Player& player) {
-  return player::spawn_with(
-      player::ThreadConfig{kPollStack, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, std::nullopt,
-                           nullptr},
+  return prism::esp32::spawn_with(
+      prism::esp32::ThreadConfig{kPollStack, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, std::nullopt,
+                                 nullptr},
       [&player] {
         return std::thread([&player] {
           for (;;) {
@@ -191,9 +201,9 @@ std::thread start_poll_thread(player::Player& player) {
 // the same core, always come first. The JPEG engine does the decode; the loader reads and shrinks.
 std::unique_ptr<player::CoverLoader> start_cover_loader(player::Storage& storage, float ui_scale) {
   const int box_px = static_cast<int>(player::PlayerUi::kCoverSide * ui_scale);
-  return player::spawn_with(
-      player::ThreadConfig{kCoverStack, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, kCoverPriority,
-                           nullptr},
+  return prism::esp32::spawn_with(
+      prism::esp32::ThreadConfig{kCoverStack, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, kCoverPriority,
+                                 nullptr},
       [&storage, box_px] {
         return std::make_unique<player::CoverLoader>(storage, player::decode_jpeg_cover, box_px);
       });
@@ -217,19 +227,19 @@ void print_status_line(const PlayerModel& model) {
   std::printf("player: %s out %s %s underruns %lu internal free %zu largest %zu\n",
               state_name(model.player.status().state), model.outputs.name(),
               model.outputs.state_text().c_str(),
-              static_cast<unsigned long>(model.outputs.get().underruns()),
+              static_cast<unsigned long>(model.player.underruns()),
               heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
               heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 }
 
 // Settings → Bluetooth shows what the radio is doing. Comparing the revision keeps the loop free of
 // strings and locks; the text is rebuilt (and the canvas repainted) only when the state changes.
-void show_bluetooth(player::PlayerUi& ui, const player::BtOutput& radio) {
+void show_bluetooth(player::PlayerUi& ui) {
   static std::uint32_t shown = 0;
-  const auto revision = radio.state_revision();
+  const auto revision = prism::esp32::bluetooth::state_revision();
   if (revision == shown) return;
   shown = revision;
-  ui.set_bluetooth_text(radio.state_text());
+  ui.set_bluetooth_text(prism::esp32::bluetooth::state_text());
 }
 
 // Settings → Output lists the outputs in OutputChoice order, so the index in the list is the byte
@@ -241,6 +251,7 @@ void wire_settings(PlayerModel& model) {
     player::save_output_choice(static_cast<player::OutputChoice>(choice));
     std::printf("player: output %zu saved for the next start\n", choice);
   });
+  if (!model.outputs.radio()) model.ui.set_bluetooth_text("Off");  // no radio came up
 }
 
 }  // namespace
@@ -260,8 +271,9 @@ extern "C" void app_main() {
   if (!card) model.ui.set_library_status(std::string{card_problem});
   else model.ui.set_storage(&model.storage);  // Folders browses the card with or without an index
   model.ui.poll_on_tick(false);  // the poll thread does that now
-  if (auto* radio = model.outputs.radio)
-    radio->on_remote([](player::Button button) { remote.post(button); });
+  if (model.outputs.radio())
+    prism::esp32::bluetooth::on_remote(
+        [](prism::esp32::bluetooth::Remote pressed) { remote.post(button_of(pressed)); });
   static auto buttons = open_buttons();
   static auto polling = start_poll_thread(model.player);
   static auto covers = start_cover_loader(model.storage, options.ui_scale);
@@ -274,7 +286,7 @@ extern "C" void app_main() {
     });
     ctx.on_loop([] { model.ui.tick(); });
     ctx.on_loop([] {
-      if (auto* radio = model.outputs.radio) show_bluetooth(model.ui, *radio);
+      if (model.outputs.radio()) show_bluetooth(model.ui);
     });
     ctx.on_loop([] { print_status_line(model); });
     ctx.on_stats(korvo1::print_stats);

@@ -49,9 +49,13 @@ ESP-IDF records in its `sbom.yml`) and re-apply that one line.
 ## The headset
 
 Bluetooth Classic, A2DP. Put the headset in pairing mode the first time: the board takes the first
-device it finds whose name contains the configured name, `CONFIG_PLAYER_BT_NAME` ("WH-1000XM3" by
-default, changed under `Player` in `idf.py menuconfig`). Once paired the headset is remembered in
-flash and the board retries it every few seconds while it is away, so it comes back on its own.
+device it finds whose name contains the configured name, `CONFIG_PRISM_BT_HEADSET_NAME`
+("WH-1000XM3" by default, under `Component config` → `prism_bt` in `idf.py menuconfig`). Once
+paired the headset is remembered in flash and the board retries it every few seconds while it is
+away, so it comes back on its own.
+
+The headset is a PRISM audio device (`prism-esp32`'s `prism_bt` component), the same one the
+tone smoke app plays on.
 
 Audio is 44.1 kHz stereo. A track at another rate is skipped with "Output cannot play 48000 Hz" on
 Bluetooth; the speaker plays 44.1 and 48 kHz.
@@ -62,6 +66,9 @@ The headset's own play, pause, next and previous buttons drive the player.
 
 Settings → Output chooses Bluetooth or the board's speaker. The choice is written to flash and
 applied at the next boot, not straight away.
+
+The speaker is PRISM's `speaker` device too, and its volume goes to the codec (`esp_codec_dev`), so
+it is the board's own volume rather than a scaling of the samples.
 
 ## Controls
 
@@ -84,8 +91,8 @@ Every 5 s the firmware prints one line:
 - `internal free` and `largest`: internal RAM free, and the largest block still available. The
   largest block is the one that matters.
 
-Around it the firmware prints `sd card: …`, `heap after bluetooth: …`, `heap after library: …`,
-`bt: <call> failed: <error>` and `speaker: <call> failed: <error>`.
+Around it the firmware prints `sd card: …` and `heap after library: …`; PRISM's Bluetooth and
+speaker device code print `bt: …` and `speaker: …` lines of their own.
 
 ## Known limits
 

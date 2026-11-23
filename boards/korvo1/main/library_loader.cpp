@@ -48,8 +48,9 @@ void LibraryLoader::begin(PlayerUi& ui, std::shared_ptr<Library>& shown) {
 void LibraryLoader::start(const Library* index) {
   // The builder reads the card and builds in memory: its stack goes to PSRAM, as the logic
   // thread's does, since internal RAM is for the render thread's 48 KB stack and the bands.
-  thread_ = spawn_with(
-      ThreadConfig{kBuilderStack, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, std::nullopt, nullptr},
+  thread_ = prism::esp32::spawn_with(
+      prism::esp32::ThreadConfig{kBuilderStack, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, std::nullopt,
+                                 nullptr},
       [this, index] { return std::thread([this, index] { build(index); }); });
 }
 
