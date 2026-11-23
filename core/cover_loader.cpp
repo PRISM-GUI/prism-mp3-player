@@ -72,8 +72,12 @@ CoverLoader::~CoverLoader() {
 
 void CoverLoader::request(std::string path) {
   const std::lock_guard lock(mutex_);
-  if (loaded_ && path == loaded_path_) return;
-  if (path == active_) return;
+  // Asking again for what is already loaded or loading cancels what is pending: the newest request
+  // wins, so an older one must not load afterwards and replace this track's cover.
+  if ((loaded_ && path == loaded_path_) || path == active_) {
+    wanted_.reset();
+    return;
+  }
   if (wanted_ && *wanted_ == path) return;
   wanted_ = std::move(path);
   wake_.notify_one();

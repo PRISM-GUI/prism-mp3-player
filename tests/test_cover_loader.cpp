@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <mutex>
 #include <span>
@@ -49,13 +50,19 @@ struct Call {
 };
 
 // Stands in for the board's JPEG decoder: records what it was handed and answers with a 1x1 image,
-// or with nothing when told to refuse.
+// or with nothing when told to refuse. While held, a call records itself and then waits, so a test
+// decides when each picture is decoded instead of racing the loader's thread.
 class FakeDecoder {
  public:
   std::shared_ptr<const prism::render::Image> operator()(std::span<const std::byte> bytes, int max_side) {
-    const std::lock_guard lock(mutex_);
-    calls_.push_back({Bytes{bytes.begin(), bytes.end()}, max_side});
-    const bool refuse = std::exchange(refuse_once_, false) || refuses_;
+    bool refuse = false;
+    {
+      std::unique_lock lock(mutex_);
+      calls_.push_back({Bytes{bytes.begin(), bytes.end()}, max_side});
+      refuse = std::exchange(refuse_once_, false) || refuses_;
+      wake_.notify_all();  // wakes wait_for_calls: "a picture is in here"
+      wake_.wait(lock, [this] { return !held_; });
+    }
     return refuse ? nullptr : unit_image();
   }
 
@@ -70,6 +77,26 @@ class FakeDecoder {
     refuse_once_ = true;
   }
 
+  // Holds the next call inside the decoder; release() lets the blocked one finish.
+  void hold() {
+    const std::lock_guard lock(mutex_);
+    held_ = true;
+  }
+
+  void release() {
+    {
+      const std::lock_guard lock(mutex_);
+      held_ = false;
+    }
+    wake_.notify_all();
+  }
+
+  // Waits until `count` pictures have reached the decoder: fails the wait rather than hang.
+  bool wait_for_calls(std::size_t count) {
+    std::unique_lock lock(mutex_);
+    return wake_.wait_for(lock, std::chrono::seconds{2}, [this, count] { return calls_.size() >= count; });
+  }
+
   std::vector<Call> calls() const {
     const std::lock_guard lock(mutex_);
     return calls_;
@@ -77,9 +104,11 @@ class FakeDecoder {
 
  private:
   mutable std::mutex mutex_;
+  std::condition_variable wake_;
   std::vector<Call> calls_;
   bool refuses_ = false;
   bool refuse_once_ = false;
+  bool held_ = false;
 };
 
 CoverDecoder decoding_into(FakeDecoder& decoder) {
@@ -98,6 +127,39 @@ bool wait_for_load(CoverLoader& loader, std::uint64_t was) {
 }
 
 }  // namespace
+
+// The loader keeps one cover: asking again for the track it already holds must also drop whatever
+// was queued behind it, or that older request loads afterwards and takes the slot.
+TEST_CASE("asking again for the loaded track cancels a pending other one") {
+  MemoryStorage storage;
+  const auto picture_a = bytes_of("picture A");
+  const auto picture_c = bytes_of("picture C");
+  const auto picture_d = bytes_of("picture D");
+  storage.add("/music/album/a.mp3", song("A", picture_a), 1000);
+  storage.add("/music/album/b.mp3", song("B", bytes_of("picture B")), 1000);
+  storage.add("/music/album/c.mp3", song("C", picture_c), 1000);
+  storage.add("/music/album/d.mp3", song("D", picture_d), 1000);
+  FakeDecoder decoder;
+  CoverLoader loader{storage, decoding_into(decoder), kMaxSide};
+
+  loader.request("/music/album/a.mp3");
+  REQUIRE(wait_for_load(loader, 0));
+
+  decoder.hold();
+  loader.request("/music/album/c.mp3");
+  REQUIRE(decoder.wait_for_calls(2));  // the loader is inside C's picture, and stays there
+  loader.request("/music/album/b.mp3");  // queued behind C
+  loader.request("/music/album/a.mp3");  // already loaded: this must drop the queued B
+
+  decoder.release();
+  REQUIRE(wait_for_load(loader, 1));  // C is done
+
+  loader.request("/music/album/d.mp3");
+  REQUIRE(decoder.wait_for_calls(3));
+  const auto calls = decoder.calls();
+  REQUIRE(calls.size() >= 3U);
+  CHECK(calls[2].bytes == picture_d);  // B was never decoded
+}
 
 TEST_CASE("a track's cover reaches the decoder byte for byte, at the size asked") {
   MemoryStorage storage;
