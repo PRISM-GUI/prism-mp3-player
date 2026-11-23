@@ -29,11 +29,4 @@ public:
   virtual void set_volume(float) = 0;  // 0..1; the sink's own volume when it has one
 };
 
-// A sink that takes the MP3 stream itself (the VLSI decoder chip). Declared only.
-class CompressedOutput {
-public:
-  virtual ~CompressedOutput() = default;
-  virtual bool write(std::span<const std::byte>) = 0;
-};
-
 }  // namespace player

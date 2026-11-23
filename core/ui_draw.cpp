@@ -139,8 +139,6 @@ void progress_bar(DrawList& dl, Rect r, float fraction, Color fill) {
                  fill);
 }
 
-bool is_song_view(View v) { return v == View::Songs || v == View::SongsOfAlbum; }
-
 std::string or_unknown(std::string s, std::string_view unknown) { return s.empty() ? std::string{unknown} : s; }
 
 }  // namespace
@@ -211,12 +209,12 @@ std::vector<PlayerUi::Row> PlayerUi::visible_rows() const {
     for (auto& t : library_->tracks(p.key, p.top, rows_on_screen_)) rows.push_back({std::move(t.title), {}});
     return rows;
   }
-  const auto unknown = p.key.view == View::Artists ? "Unknown Artist" : "Unknown Album";
+  const auto unknown = p.key.view == View::Artists ? kUnknownArtist : kUnknownAlbum;
   for (auto& n : library_->names(p.key, p.top, rows_on_screen_)) rows.push_back({or_unknown(std::move(n), unknown), {}});
   if (p.key.view != View::Albums) return rows;
   const auto artists = library_->album_artists(p.key, p.top, rows.size());
   for (std::size_t i = 0; i < std::min(rows.size(), artists.size()); ++i)
-    rows[i].value = or_unknown(artists[i], "Unknown Artist");
+    rows[i].value = or_unknown(artists[i], kUnknownArtist);
   return rows;
 }
 
@@ -254,8 +252,8 @@ void PlayerUi::draw_now_playing(const Pen& pen) const {
   dl.rect_outline(rect(14, 40, kCoverSide, kCoverSide), kRule);
   const float x = 128, w = width - x - kPad;
   clipped_text(dl, track->title, rect(x, 44, w, 22), 16.f, kInk, kBold);
-  clipped_text(dl, or_unknown(track->artist, "Unknown Artist"), rect(x, 70, w, 20), kText, kInk);
-  clipped_text(dl, or_unknown(track->album, "Unknown Album"), rect(x, 92, w, 20), kText, kGreyInk);
+  clipped_text(dl, or_unknown(track->artist, kUnknownArtist), rect(x, 70, w, 20), kText, kInk);
+  clipped_text(dl, or_unknown(track->album, kUnknownAlbum), rect(x, 92, w, 20), kText, kGreyInk);
   text(dl, std::format("{} of {}", status.index + 1, size), x, 116, kSmallText, kGreyInk);
   if (!status.message.empty()) clipped_text(dl, status.message, rect(14, 146, width - 28, 18), kSmallText, kGreyInk);
 
@@ -272,8 +270,7 @@ void PlayerUi::draw_now_playing(const Pen& pen) const {
   const float remaining_x = bar_right - pen.text_width(remaining, kSmallText);
   text(dl, std::move(remaining), remaining_x, 180, kSmallText, kInk);
   if (!scrubbing_)
-    progress_bar(dl, rect(kBarMargin, 222, bar_right - kBarMargin, 4), static_cast<float>(volume_) / kVolumeSteps,
-                 kRule);
+    progress_bar(dl, rect(kBarMargin, 222, bar_right - kBarMargin, 4), volume_fraction(), kRule);
 }
 
 namespace {

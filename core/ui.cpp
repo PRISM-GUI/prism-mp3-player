@@ -2,7 +2,7 @@
 
 #include "core/cover_loader.hpp"
 #include "core/fold.hpp"
-#include "core/index_format.hpp"
+#include "core/path.hpp"
 #include "core/tags.hpp"
 
 #include <algorithm>
@@ -29,18 +29,21 @@ constexpr std::size_t kTagWindow = 32;
 
 constexpr std::array kMusicViews{View::Artists, View::Albums, View::Songs};
 
-bool is_song_view(View v) { return v == View::Songs || v == View::SongsOfAlbum; }
+// The rows a Select queues from a list of `count` rows: the whole list when it fits in a queue,
+// else a queue of kSongsQueue rows reaching back kSongsBefore before the selected one.
+struct Window {
+  std::size_t first, last;
+};
 
-// The file's name without its folder: what read_tags needs, since it names an untagged file by the
-// name it is handed.
-std::string_view file_name_of(std::string_view path) {
-  const auto slash = path.find_last_of('/');
-  return slash == std::string_view::npos ? path : path.substr(slash + 1);
+Window queue_window(std::size_t count, std::size_t row) {
+  if (count <= kSongsQueue) return {0, count};
+  const auto first = row - std::min(row, kSongsBefore);
+  return {first, std::min(first + kSongsQueue, count)};
 }
 
 // The file's name without its folder and its extension: what a row says when its tags were not read.
 std::string file_stem(std::string_view path) {
-  const auto name = file_name_of(path);
+  const auto name = file_name(path);
   const auto dot = name.find_last_of('.');
   return std::string{dot == std::string_view::npos ? name : name.substr(0, dot)};
 }
@@ -55,8 +58,10 @@ std::string_view list_title(const ViewKey& key) {
     case View::Artists: return "Artists";
     case View::Albums: return "Albums";
     case View::Songs: return "Songs";
-    case View::AlbumsOfArtist: return key.artist.empty() ? "Unknown Artist" : std::string_view{key.artist};
-    case View::SongsOfAlbum: return key.album.empty() ? "Unknown Album" : std::string_view{key.album};
+    case View::AlbumsOfArtist:
+      return key.artist.empty() ? PlayerUi::kUnknownArtist : std::string_view{key.artist};
+    case View::SongsOfAlbum:
+      return key.album.empty() ? PlayerUi::kUnknownAlbum : std::string_view{key.album};
   }
   return {};
 }
@@ -110,7 +115,7 @@ void PlayerUi::fit_rows(float height) {
 PlayerUi::PlayerUi(Library* library, Player& player) : library_(library), player_(player) {
   clock_ = [] { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
   stack_.push_back(menu(Screen::Main));
-  player_.set_volume(static_cast<float>(volume_) / kVolumeSteps);
+  player_.set_volume(volume_fraction());
 }
 
 std::vector<std::string> PlayerUi::menu_rows(Screen s) const {
@@ -175,7 +180,7 @@ void PlayerUi::rotate(int steps) {
     return;
   }
   volume_ = std::clamp(volume_ + steps, 0, kVolumeSteps);
-  player_.set_volume(static_cast<float>(volume_) / kVolumeSteps);
+  player_.set_volume(volume_fraction());
 }
 
 void PlayerUi::select() {
@@ -227,9 +232,8 @@ void PlayerUi::select_list_row() {
 }
 
 void PlayerUi::play_from(std::size_t row) {
-  const bool whole_view = here().count <= kSongsQueue;
-  const auto first = whole_view ? 0 : row - std::min(row, kSongsBefore);
-  auto queue = library_->tracks(here().key, first, kSongsQueue);
+  const auto [first, last] = queue_window(here().count, row);
+  auto queue = library_->tracks(here().key, first, last - first);
   if (row - first >= queue.size()) return;
   player_.play(std::move(queue), row - first);
   open(menu(Screen::NowPlaying));
@@ -245,7 +249,7 @@ void PlayerUi::select_folder_row() {
   if (place.selected >= place.rows.size()) return;
   const auto& label = place.rows[place.selected].label;
   if (!label.ends_with('/')) return play_folder(place.dir, place.selected);
-  open_folder(index_format::join(place.dir, std::string_view{label}.substr(0, label.size() - 1)));
+  open_folder(join(place.dir, std::string_view{label}.substr(0, label.size() - 1)));
 }
 
 // Lists the folder once, when it is entered: subfolders first with a trailing '/', then its .mp3
@@ -290,12 +294,10 @@ void PlayerUi::play_folder(std::string_view dir, std::size_t row) {
   for (std::size_t i = 0; i < place.rows.size(); ++i) {
     if (place.rows[i].label.ends_with('/')) continue;
     if (i == row) first_file = paths.size();
-    paths.push_back(index_format::join(dir, place.rows[i].label));
+    paths.push_back(join(dir, place.rows[i].label));
   }
   if (paths.empty()) return;
-  const bool whole_folder = paths.size() <= kSongsQueue;
-  const auto first = whole_folder ? 0 : first_file - std::min(first_file, kSongsBefore);
-  const auto last = whole_folder ? paths.size() : std::min(first + kSongsQueue, paths.size());
+  const auto [first, last] = queue_window(paths.size(), first_file);
   if (first_file < first || first_file >= last) return;
   const auto tagged = first_file - std::min(first_file, kTagWindow / 2);
   const auto tagged_end = std::min(tagged + kTagWindow, paths.size());
@@ -311,7 +313,7 @@ void PlayerUi::play_folder(std::string_view dir, std::size_t row) {
       queue.push_back(row_from_file(paths[i]));
       continue;
     }
-    const auto tags = read_tags(*file, file_name_of(paths[i]));
+    const auto tags = read_tags(*file, file_name(paths[i]));
     queue.push_back({paths[i], tags.title, tags.artist, tags.album, tags.track});
   }
   player_.play(std::move(queue), first_file - first);
@@ -355,13 +357,17 @@ std::shared_ptr<const render::Image> PlayerUi::cover_image() const {
   return loaded ? *loaded : nullptr;
 }
 
+void PlayerUi::refresh_music_menus() {
+  for (auto& p : stack_)
+    if (p.screen == Screen::Music) p = menu(Screen::Music);
+}
+
 void PlayerUi::set_library(Library* library) {
   library_ = library;
   library_status_.clear();
   if (here().screen == Screen::List) stack_ = {menu(Screen::Main)};
   std::erase_if(stack_, [](const Place& p) { return p.screen == Screen::List; });
-  for (auto& p : stack_)
-    if (p.screen == Screen::Music) p = menu(Screen::Music);
+  refresh_music_menus();
   changed();
 }
 
@@ -376,8 +382,7 @@ void PlayerUi::set_storage(Storage* storage) {
   if (storage_ == storage) return;
   storage_ = storage;
   std::erase_if(stack_, [](const Place& p) { return p.screen == Screen::Folders; });
-  for (auto& p : stack_)
-    if (p.screen == Screen::Music) p = menu(Screen::Music);
+  refresh_music_menus();
   changed();
 }
 

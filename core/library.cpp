@@ -219,7 +219,7 @@ private:
 }  // namespace
 
 std::unique_ptr<Library> Library::open(Storage& storage, std::string_view root) {
-  auto file = storage.open(join(root, file_name));
+  auto file = storage.open(join(root, index_file_name));
   if (!file) return nullptr;
   const auto header = read_header(*file);
   if (!header) return nullptr;

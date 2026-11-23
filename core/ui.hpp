@@ -43,6 +43,10 @@ public:
   static constexpr core::Color kTitleBar = core::Color::rgba(0xE4, 0xE6, 0xEA);
   static constexpr core::Color kBattery = core::Color::rgba(0x4A, 0x4E, 0x54);  // its outline
 
+  // What a track with no tag for it is called: the lists and Now Playing say the same thing.
+  static constexpr std::string_view kUnknownArtist = "Unknown Artist";
+  static constexpr std::string_view kUnknownAlbum = "Unknown Album";
+
   struct Settings {
     std::vector<std::string> outputs{"Speakers"};
     std::size_t output = 0;  // shown here, applied at the next start
@@ -123,6 +127,8 @@ private:
   Place list(ViewKey) const;
   std::vector<std::string> menu_rows(Screen) const;
   bool has_music() const { return library_ && library_->count({View::Songs}) > 0; }
+  // The Music menu's rows depend on the library and the card: both setters re-count them.
+  void refresh_music_menus();
 
   void rotate(int steps);
   void select();
@@ -148,6 +154,8 @@ private:
   void watch_cover();
   // The current track's cover, or null while it loads or when it has none.
   std::shared_ptr<const render::Image> cover_image() const;
+  // The volume as the sinks take it (0..1) and the bars draw it.
+  float volume_fraction() const { return static_cast<float>(volume_) / kVolumeSteps; }
 
   Library* library_;
   Storage* storage_ = nullptr;  // the card, for Folders; not the same as the library

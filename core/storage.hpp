@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <iosfwd>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -33,5 +34,15 @@ public:
   // Moves `from` to `to`, replacing `to` if it exists. False when `from` is missing or the move fails.
   virtual bool rename(std::string_view from, std::string_view to) = 0;
 };
+
+// Exactly `n` bytes at `offset`, or nothing: a range past the end of the file or a short read is
+// not something a tag or a picture parser can use half of.
+inline std::optional<std::vector<std::byte>> read_exact(File& file, std::uint64_t offset,
+                                                        std::uint64_t n) {
+  if (offset > file.size() || n > file.size() - offset) return std::nullopt;
+  std::vector<std::byte> bytes(static_cast<std::size_t>(n));
+  if (file.read(offset, bytes) != bytes.size()) return std::nullopt;
+  return bytes;
+}
 
 }  // namespace player

@@ -1,7 +1,7 @@
 #include "core/cover_loader.hpp"
 
 #include "core/fold.hpp"
-#include "core/index_format.hpp"
+#include "core/path.hpp"
 #include "core/tags.hpp"
 
 #include <algorithm>
@@ -17,12 +17,6 @@ using Bytes = std::vector<std::byte>;
 // Tried in this order whatever their extension: the names an album's picture usually has.
 constexpr std::array<std::string_view, 4> kPreferredNames{"cover", "folder", "front", "album"};
 constexpr std::array<std::string_view, 3> kPictureExtensions{".jpg", ".jpeg", ".png"};
-
-std::string parent_of(std::string_view path) {
-  const auto slash = path.find_last_of('/');
-  if (slash == std::string_view::npos) return {};
-  return slash == 0 ? std::string{"/"} : std::string{path.substr(0, slash)};
-}
 
 bool is_picture(std::string_view name) {
   const auto folded = fold_for_sort(name);
@@ -41,9 +35,7 @@ std::size_t preferred_rank(std::string_view name) {
 // Exactly `size` bytes at `offset`, or nothing: a short read means the file is not what its tags say.
 std::optional<Bytes> read_bytes(File& file, std::uint64_t offset, std::uint64_t size) {
   if (size == 0 || size > kMaxCoverBytes) return std::nullopt;
-  Bytes bytes(static_cast<std::size_t>(size));
-  if (file.read(offset, bytes) != bytes.size()) return std::nullopt;
-  return bytes;
+  return read_exact(file, offset, size);
 }
 
 // The picture to use for a folder: a preferred name first, else the first name in folded order.
@@ -133,7 +125,7 @@ std::shared_ptr<const prism::render::Image> CoverLoader::folder_picture(std::str
   auto image = [this, &dir] {
     const auto name = best_picture(storage_.list(dir));
     if (name.empty()) return std::shared_ptr<const prism::render::Image>{};
-    auto file = storage_.open(index_format::join(dir, name));
+    auto file = storage_.open(join(dir, name));
     if (!file) return std::shared_ptr<const prism::render::Image>{};
     // simplify: one folder picture per track: a preferred name that fails to decode is not replaced
     // by another picture of the same folder. Upgrade: walk the candidates in order.

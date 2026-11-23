@@ -5,6 +5,7 @@
 #include "core/fold.hpp"
 #include "core/index_format.hpp"
 #include "core/library.hpp"
+#include "core/path.hpp"
 #include "core/tags.hpp"
 
 #include <prism/profile/trace_format.hpp>
@@ -134,12 +135,11 @@ Collected scan(Storage& storage, std::string_view root) {
   return c;
 }
 
-std::string_view file_name_of(std::string_view path) { return path.substr(path.rfind('/') + 1); }
-
 void read_track(Storage& storage, Collected& c, StrRef path) {
   const auto file = storage.open(c.pool.get(path));
   if (!file) return;
-  const auto t = read_tags(*file, file_name_of(c.pool.get(path)));
+  // read_tags names an untagged file by the name it is handed: the file's own, not its path.
+  const auto t = read_tags(*file, file_name(c.pool.get(path)));
   const auto title = c.pool.add(t.title);
   c.tracks.push_back({path, title, c.artists.id(c.pool, t.artist), c.albums.id(c.pool, t.album),
                       t.track});
@@ -313,7 +313,7 @@ bool write_index(std::ostream& out, const Index& x) {
   return out.good();
 }
 
-std::string staged_path(std::string_view root) { return join(root, file_name) + ".new"; }
+std::string staged_path(std::string_view root) { return join(root, index_file_name) + ".new"; }
 
 bool write_index_file(Storage& storage, std::string_view path, const Index& x) {
   auto out = storage.create(path);
@@ -340,7 +340,7 @@ bool Library::build(Storage& storage, std::string_view root,
 bool Library::install(Storage& storage, std::string_view root) {
   const auto staged = staged_path(root);
   if (!storage.open(staged)) return false;
-  return storage.rename(staged, join(root, file_name));
+  return storage.rename(staged, join(root, index_file_name));
 }
 
 }  // namespace player

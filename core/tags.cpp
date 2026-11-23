@@ -25,13 +25,6 @@ constexpr std::array<std::string_view, 4> kTextIds{"TIT2", "TPE1", "TALB", "TRCK
 
 unsigned u8(std::byte b) { return std::to_integer<unsigned>(b); }
 
-std::optional<std::vector<std::byte>> read_exact(File& f, std::uint64_t offset, std::uint64_t n) {
-  if (offset > f.size() || n > f.size() - offset) return std::nullopt;
-  std::vector<std::byte> buf(n);
-  if (f.read(offset, buf) != n) return std::nullopt;
-  return buf;
-}
-
 std::uint32_t be32(Bytes b) { return u8(b[0]) << 24 | u8(b[1]) << 16 | u8(b[2]) << 8 | u8(b[3]); }
 
 std::optional<std::uint32_t> synchsafe(Bytes b) {

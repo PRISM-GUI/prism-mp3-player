@@ -17,6 +17,10 @@ struct TrackRow {
 
 enum class View { Artists, Albums, Songs, AlbumsOfArtist, SongsOfAlbum };
 
+// A view whose rows are songs: Select plays one, rather than opening a narrower view. Shared by the
+// UI's event handling and its drawing.
+inline bool is_song_view(View v) { return v == View::Songs || v == View::SongsOfAlbum; }
+
 // artist/album: the filter where the view needs one. An album is an artist's: SongsOfAlbum
 // needs both, and an empty artist is the unknown artist, never "any".
 struct ViewKey {

@@ -2,6 +2,7 @@
 // The index file's constants and little-endian helpers, shared by the writer (library_build.cpp)
 // and the reader (library.cpp). The byte layout is described at the top of library.cpp.
 #include "core/library.hpp"
+#include "core/path.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -12,7 +13,7 @@ namespace player::index_format {
 
 constexpr std::string_view magic = "PRLB";
 constexpr std::uint32_t version = 2;
-constexpr std::string_view file_name = ".prism-library";
+constexpr std::string_view index_file_name = ".prism-library";
 
 constexpr std::size_t header_size = 40;
 constexpr std::size_t ref_size = 8;
@@ -71,12 +72,5 @@ inline std::uint64_t get64(const std::byte* p) {
 }
 
 inline StrRef ref_at(const std::byte* p) { return {get32(p), get32(p + 4)}; }
-
-inline std::string join(std::string_view dir, std::string_view name) {
-  std::string out{dir};
-  if (out.empty() || out.back() != '/') out += '/';
-  out += name;
-  return out;
-}
 
 }  // namespace player::index_format

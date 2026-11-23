@@ -1,5 +1,6 @@
 #include "core/player.hpp"
 
+#include "core/path.hpp"
 #include "core/tags.hpp"
 
 #include <algorithm>
@@ -7,11 +8,6 @@
 
 namespace player {
 namespace {
-
-std::string_view file_name(std::string_view path) {
-  const auto slash = path.rfind('/');
-  return slash == std::string_view::npos ? path : path.substr(slash + 1);
-}
 
 bool supported_rate(int hz) { return hz == 44100 || hz == 48000; }
 
@@ -227,9 +223,6 @@ double Player::position_s() const {
   return double(played() - current_.start) / 2 / format_.sample_rate;
 }
 
-// Moves the current track to `seconds`: the ring is flushed and refilled the way a track change
-// does it, so the audio that plays next comes from there. A paused player stays paused, with the
-// new position already in the ring.
 void Player::seek(double seconds) {
   const std::lock_guard lock(mutex_);
   if (state_ == State::Stopped) return;
