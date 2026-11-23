@@ -82,7 +82,7 @@ private:
   PcmOutput& output_;
   // Guards every member below: the UI's thread and the audio thread both call in.
   mutable std::mutex mutex_;
-  PcmRing ring_{2 * 48000 * 2};  // read by the output's thread without the lock, by design
+  PcmRing ring_{2 * kRate48k * 2};  // read by the output's thread without the lock, by design
   std::vector<TrackRow> queue_;
   Status::State state_ = Status::State::Stopped;
   Track current_;

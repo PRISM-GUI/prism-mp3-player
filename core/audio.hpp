@@ -13,6 +13,11 @@ struct PcmFormat {
   bool operator==(const PcmFormat&) const = default;
 };
 
+// The two rates every output plays: 44.1 kHz is what a CD rip carries and all A2DP reliably
+// streams, 48 kHz is the speaker codec's other native rate.
+inline constexpr int kRate44k1 = 44100;
+inline constexpr int kRate48k = 48000;
+
 // A sink that pulls PCM from a ring on its own thread (A2DP on the board, audio::Output on the
 // desktop).
 // Its methods run with the Player's lock held while its own thread reads the ring: neither may

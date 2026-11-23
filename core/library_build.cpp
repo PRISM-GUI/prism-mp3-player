@@ -330,11 +330,11 @@ std::uint64_t fingerprint(Storage& storage, std::string_view root) {
 }
 
 bool Library::build(Storage& storage, std::string_view root,
-                    const std::function<bool(int)>& progress, bool install) {
+                    const std::function<bool(int)>& progress, Install install) {
   auto collected = scan(storage, root);
   if (!read_tracks(storage, collected, progress)) return false;
   if (!write_index_file(storage, staged_path(root), index_of(std::move(collected)))) return false;
-  return !install || Library::install(storage, root);
+  return install == Install::staged || Library::install(storage, root);
 }
 
 bool Library::install(Storage& storage, std::string_view root) {

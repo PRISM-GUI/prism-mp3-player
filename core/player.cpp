@@ -9,7 +9,7 @@
 namespace player {
 namespace {
 
-bool supported_rate(int hz) { return hz == 44100 || hz == 48000; }
+bool supported_rate(int hz) { return hz == kRate44k1 || hz == kRate48k; }
 
 // poll() decodes this many frames at most: a few milliseconds of audio, so a command from the UI
 // never waits behind a long decode.

@@ -247,9 +247,9 @@ void PlayerUi::select_folders() {
 void PlayerUi::select_folder_row() {
   const auto& place = here();
   if (place.selected >= place.rows.size()) return;
-  const auto& label = place.rows[place.selected].label;
-  if (!label.ends_with('/')) return play_folder(place.dir, place.selected);
-  open_folder(join(place.dir, std::string_view{label}.substr(0, label.size() - 1)));
+  const auto& row = place.rows[place.selected];
+  if (!row.folder) return play_folder(place.dir, place.selected);
+  open_folder(join(place.dir, std::string_view{row.label}.substr(0, row.label.size() - 1)));
 }
 
 // Lists the folder once, when it is entered: subfolders first with a trailing '/', then its .mp3
@@ -280,7 +280,7 @@ std::vector<PlayerUi::Row> PlayerUi::read_folder(std::string_view dir) const {
   });
   std::vector<Row> rows;
   rows.reserve(entries.size());
-  for (auto& e : entries) rows.push_back({std::move(e.name), {}});
+  for (auto& e : entries) rows.push_back({std::move(e.name), {}, e.is_dir});
   return rows;
 }
 
@@ -292,7 +292,7 @@ void PlayerUi::play_folder(std::string_view dir, std::size_t row) {
   std::vector<std::string> paths;
   std::size_t first_file = 0;
   for (std::size_t i = 0; i < place.rows.size(); ++i) {
-    if (place.rows[i].label.ends_with('/')) continue;
+    if (place.rows[i].folder) continue;
     if (i == row) first_file = paths.size();
     paths.push_back(join(dir, place.rows[i].label));
   }

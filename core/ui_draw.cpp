@@ -54,6 +54,10 @@ constexpr const FontStyle kBold{render::FontRole::Ui, true};
 Rect rect(float x, float y, float w, float h) { return {Point{X{x}, Y{y}}, Size{Width{w}, Height{h}}}; }
 Point pt(float x, float y) { return {X{x}, Y{y}}; }
 
+// Where Now Playing's picture goes: the image and its placeholder share this box, and so does the
+// outline around them.
+Rect cover_box() { return rect(14, 40, PlayerUi::kCoverSide, PlayerUi::kCoverSide); }
+
 void text(DrawList& dl, std::string s, float x, float y, float size, Color c, FontStyle font = {}) {
   dl.text(std::move(s), pt(x, y), size, c, 0.f, TextAnchor::TopLeft, font);
 }
@@ -220,11 +224,11 @@ std::vector<PlayerUi::Row> PlayerUi::visible_rows() const {
 
 void PlayerUi::draw_list(const Pen& pen) const {
   const auto& p = here();
-  // A list opens when it holds views; a folder row opens when it is a subfolder, told by its '/'.
+  // A list opens when it holds views; a folder row opens when it is a subfolder.
   const bool list_opens = p.screen == Screen::List && !is_song_view(p.key.view);
   const auto rows = visible_rows();
   for (std::size_t i = 0; i < rows.size(); ++i) {
-    const bool opens = p.screen == Screen::Folders ? rows[i].label.ends_with('/') : list_opens;
+    const bool opens = p.screen == Screen::Folders ? rows[i].folder : list_opens;
     draw_row(pen, pen.width - 6, i, p.top + i == p.selected, rows[i], opens);
   }
 }
@@ -238,29 +242,44 @@ void PlayerUi::draw_now_playing(const Pen& pen) const {
     if (!status.message.empty()) centred_note(pen, 126, status.message, kSmallText);
     return;
   }
+  draw_cover(pen);
+  draw_track_text(pen, status, *track, size);
+  draw_progress(pen, status);
+  draw_volume(pen);
+}
+
+// The cover, in the same box the placeholder fills: the placeholder shows until a load lands, and
+// stays for a track without one.
+void PlayerUi::draw_cover(const Pen& pen) const {
   auto& dl = pen.dl;
-  const float width = pen.width;
-
-  // The cover, in the same box the placeholder fills: the placeholder shows until a load lands, and
-  // stays for a track without one.
-  const auto cover = cover_image();
-  if (cover) {
-    dl.image(std::move(cover), rect(14, 40, kCoverSide, kCoverSide));
+  const auto box = cover_box();
+  if (auto cover = cover_image()) {
+    dl.image(std::move(cover), box);
   } else {
-    dl.filled_rect(rect(14, 40, kCoverSide, kCoverSide), kCover);
+    dl.filled_rect(box, kCover);
   }
-  dl.rect_outline(rect(14, 40, kCoverSide, kCoverSide), kRule);
-  const float x = 128, w = width - x - kPad;
-  clipped_text(dl, track->title, rect(x, 44, w, 22), 16.f, kInk, kBold);
-  clipped_text(dl, or_unknown(track->artist, kUnknownArtist), rect(x, 70, w, 20), kText, kInk);
-  clipped_text(dl, or_unknown(track->album, kUnknownAlbum), rect(x, 92, w, 20), kText, kGreyInk);
-  text(dl, std::format("{} of {}", status.index + 1, size), x, 116, kSmallText, kGreyInk);
-  if (!status.message.empty()) clipped_text(dl, status.message, rect(14, 146, width - 28, 18), kSmallText, kGreyInk);
+  dl.rect_outline(box, kRule);
+}
 
-  const float bar_right = width - kBarMargin;
-  const auto fraction = status.duration_s > 0 ? static_cast<float>(status.position_s / status.duration_s) : 0.f;
+void PlayerUi::draw_track_text(const Pen& pen, const Player::Status& status, const TrackRow& track,
+                               std::size_t size) const {
+  auto& dl = pen.dl;
+  const float x = 128, w = pen.width - x - kPad;
+  clipped_text(dl, track.title, rect(x, 44, w, 22), 16.f, kInk, kBold);
+  clipped_text(dl, or_unknown(track.artist, kUnknownArtist), rect(x, 70, w, 20), kText, kInk);
+  clipped_text(dl, or_unknown(track.album, kUnknownAlbum), rect(x, 92, w, 20), kText, kGreyInk);
+  text(dl, std::format("{} of {}", status.index + 1, size), x, 116, kSmallText, kGreyInk);
+  if (!status.message.empty())
+    clipped_text(dl, status.message, rect(14, 146, pen.width - 28, 18), kSmallText, kGreyInk);
+}
+
+// The progress bar and its two clocks, plus the diamond on the bar while the wheel seeks.
+void PlayerUi::draw_progress(const Pen& pen, const Player::Status& status) const {
+  auto& dl = pen.dl;
+  const float bar_right = pen.width - kBarMargin;
+  const auto fraction =
+      status.duration_s > 0 ? static_cast<float>(status.position_s / status.duration_s) : 0.f;
   progress_bar(dl, rect(kBarMargin, 168, bar_right - kBarMargin, 8), fraction, kHighlight);
-  // Scrub mode: a diamond where the play head will land, and no volume bar while the wheel seeks.
   if (scrubbing_) {
     const float head = kBarMargin + fraction * (bar_right - kBarMargin);
     dl.filled_polygon({pt(head, 167), pt(head + 5, 172), pt(head, 177), pt(head - 5, 172)}, kHighlight);
@@ -269,8 +288,13 @@ void PlayerUi::draw_now_playing(const Pen& pen) const {
   auto remaining = "-" + clock(status.duration_s - status.position_s);
   const float remaining_x = bar_right - pen.text_width(remaining, kSmallText);
   text(dl, std::move(remaining), remaining_x, 180, kSmallText, kInk);
-  if (!scrubbing_)
-    progress_bar(dl, rect(kBarMargin, 222, bar_right - kBarMargin, 4), volume_fraction(), kRule);
+}
+
+// The volume bar: hidden while scrubbing, since the wheel moves the play head and not the volume.
+void PlayerUi::draw_volume(const Pen& pen) const {
+  if (scrubbing_) return;
+  const float bar_right = pen.width - kBarMargin;
+  progress_bar(pen.dl, rect(kBarMargin, 222, bar_right - kBarMargin, 4), volume_fraction(), kRule);
 }
 
 namespace {

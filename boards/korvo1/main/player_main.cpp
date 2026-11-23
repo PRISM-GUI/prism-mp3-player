@@ -58,14 +58,12 @@ constexpr std::int64_t kStatusEveryUs = 5'000'000;
 
 // What the builder thread found of the card: the index it was given is current, a new one waits
 // at .prism-library.new, or none could be written.
-struct Build {
-  enum class Kind { current, staged, failed } kind;
-};
+enum class BuildResult { current, staged, failed };
 
 // What the builder thread leaves for the logic thread, merged until it takes it.
 struct Handover {
   bool updating = false;
-  std::optional<Build> built;
+  std::optional<BuildResult> built;
 };
 
 // Builds the card's index off the logic thread and hands it over. The logic thread opens the
@@ -85,7 +83,7 @@ public:
     auto handover = take();
     if (!handover) return;
     if (handover->updating) ui.set_library_status(std::string{kUpdating});
-    if (handover->built) apply(ui, shown, handover->built->kind);
+    if (handover->built) apply(ui, shown, *handover->built);
   }
 
 private:
@@ -114,18 +112,18 @@ private:
 
   void build(const player::Library* index) {
     if (index && index->is_current(storage_, kMusicRoot))
-      return post(Handover{false, Build{Build::Kind::current}});
+      return post(Handover{false, BuildResult::current});
     post(Handover{true, std::nullopt});
     // simplify: no cancellation: the run ends only with the board.
-    const bool staged =
-        player::Library::build(storage_, kMusicRoot, [](int) { return true; }, false);
-    post(Handover{false, Build{staged ? Build::Kind::staged : Build::Kind::failed}});
+    const bool staged = player::Library::build(storage_, kMusicRoot, [](int) { return true; },
+                                               player::Library::Install::staged);
+    post(Handover{false, staged ? BuildResult::staged : BuildResult::failed});
   }
 
   // Where the hand-over lands, on the logic thread.
-  void apply(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown, Build::Kind kind) {
-    if (kind == Build::Kind::current) return;
-    if (kind == Build::Kind::failed) return ui.set_library_status(std::string{kCannotWrite});
+  void apply(player::PlayerUi& ui, std::shared_ptr<player::Library>& shown, BuildResult result) {
+    if (result == BuildResult::current) return;
+    if (result == BuildResult::failed) return ui.set_library_status(std::string{kCannotWrite});
     install(ui, shown);
   }
 
@@ -356,8 +354,7 @@ void show_bluetooth(player::PlayerUi& ui, const player::BtOutput& radio) {
   const auto revision = radio.state_revision();
   if (revision == shown) return;
   shown = revision;
-  ui.settings.bluetooth = radio.state_text();
-  ui.revision.set(ui.revision.get() + 1);
+  ui.set_bluetooth_text(radio.state_text());
 }
 
 }  // namespace

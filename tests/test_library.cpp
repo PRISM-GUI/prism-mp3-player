@@ -382,7 +382,7 @@ TEST_CASE("build without install leaves the live index untouched") {
   REQUIRE(Library::build(s, "/music", keep_going));
   add_song(s, "/music/new.mp3", "New", "abba", "Gold", 4);
 
-  REQUIRE(Library::build(s, "/music", keep_going, false));
+  REQUIRE(Library::build(s, "/music", keep_going, Library::Install::staged));
 
   const auto live = Library::open(s, "/music");
   REQUIRE(live);
@@ -396,7 +396,7 @@ TEST_CASE("install then open gives the new index") {
   fill_six(s);
   REQUIRE(Library::build(s, "/music", keep_going));
   add_song(s, "/music/new.mp3", "New", "abba", "Gold", 4);
-  REQUIRE(Library::build(s, "/music", keep_going, false));
+  REQUIRE(Library::build(s, "/music", keep_going, Library::Install::staged));
 
   CHECK_FALSE(Library::install(s, "/nowhere"));
   REQUIRE(Library::install(s, "/music"));

@@ -223,6 +223,22 @@ TEST_CASE("cycling the output in Settings tells the board, for the next start") 
   CHECK(shows(ui, "Bluetooth"));
 }
 
+TEST_CASE("set_bluetooth_text repaints") {
+  Six f;
+  PlayerUi ui{f.library.get(), f.player};
+
+  press(ui, {Rotate{2}, Button::Select});  // Main → Settings
+  REQUIRE(ui.screen_title() == "Settings");
+  const auto before = ui.revision.get();
+
+  ui.set_bluetooth_text("Connected to WH-1000XM3");
+  CHECK(ui.revision.get() == before + 1);  // the setter repaints: no caller bumps revision
+  CHECK(shows(ui, "Connected to WH-1000XM3"));
+
+  ui.set_bluetooth_text("Connected to WH-1000XM3");
+  CHECK(ui.revision.get() == before + 1);  // the same text is not a repaint
+}
+
 TEST_CASE("Menu goes back") {
   Six f;
   PlayerUi ui{f.library.get(), f.player};

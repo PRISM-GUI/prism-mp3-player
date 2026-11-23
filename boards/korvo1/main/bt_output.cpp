@@ -557,7 +557,7 @@ BtOutput& BtOutput::open() {
 }
 
 bool BtOutput::accepts(PcmFormat format) const {
-  return format.sample_rate == 44100 && format.channels == 2;
+  return format.sample_rate == player::kRate44k1 && format.channels == 2;
 }
 
 bool BtOutput::start(PcmFormat format, PcmRing& ring) {

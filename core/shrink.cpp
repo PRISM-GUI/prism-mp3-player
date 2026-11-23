@@ -19,7 +19,8 @@ Box source_box(int ox, int oy, int w, int h, int ow, int oh) {
           std::max(oy * h / oh + 1, (oy + 1) * h / oh)};
 }
 
-void average_into(std::uint8_t* out, std::span<const std::uint8_t> rgb, int stride, Box b) {
+void average_into(std::span<std::uint8_t, 4> out, std::span<const std::uint8_t> rgb, int stride,
+                  Box b) {
   std::uint32_t sum[3]{};
   for (int y = b.y0; y < b.y1; ++y)
     for (int x = b.x0; x < b.x1; ++x)
@@ -36,8 +37,8 @@ bool fits(std::span<const std::uint8_t> rgb, int width, int height, int stride) 
 
 }  // namespace
 
-std::shared_ptr<const prism::render::Image> shrink_rgb888(std::span<const std::uint8_t> rgb, int width,
-                                                          int height, int stride, int max_side) {
+std::shared_ptr<const prism::render::Image> shrink_rgb888(Rgb888 picture, int max_side) {
+  const auto [rgb, width, height, stride] = picture;
   if (max_side <= 0 || !fits(rgb, width, height, stride)) return nullptr;
   const double scale = std::min(1.0, static_cast<double>(max_side) / std::max(width, height));
   const int ow = std::max(1, static_cast<int>(std::lround(width * scale)));
@@ -45,7 +46,7 @@ std::shared_ptr<const prism::render::Image> shrink_rgb888(std::span<const std::u
   std::vector<std::uint8_t> rgba(static_cast<std::size_t>(ow) * oh * 4);
   for (int oy = 0; oy < oh; ++oy)
     for (int ox = 0; ox < ow; ++ox)
-      average_into(&rgba[(static_cast<std::size_t>(oy) * ow + ox) * 4], rgb, stride,
+      average_into(std::span{rgba}.subspan((static_cast<std::size_t>(oy) * ow + ox) * 4).first<4>(), rgb, stride,
                    source_box(ox, oy, width, height, ow, oh));
   auto image = prism::render::Image::from_rgba(ow, oh, std::move(rgba));
   return image ? *image : nullptr;

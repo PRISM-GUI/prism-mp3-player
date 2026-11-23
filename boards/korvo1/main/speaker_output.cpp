@@ -159,7 +159,7 @@ struct SpeakerOutput::Impl {
       std::printf("speaker: bsp_audio_codec_speaker_init returned null\n");
       return false;
     }
-    return open(44100);
+    return open(player::kRate44k1);
   }
 };
 
@@ -177,7 +177,8 @@ SpeakerOutput::~SpeakerOutput() {
 }
 
 bool SpeakerOutput::accepts(PcmFormat format) const {
-  return format.channels == 2 && (format.sample_rate == 44100 || format.sample_rate == 48000);
+  return format.channels == 2 &&
+         (format.sample_rate == player::kRate44k1 || format.sample_rate == player::kRate48k);
 }
 
 bool SpeakerOutput::start(PcmFormat format, PcmRing& ring) {

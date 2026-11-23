@@ -43,12 +43,15 @@ public:
   static std::unique_ptr<Library> open(Storage&, std::string_view root);
   // Whether the card still holds the files the index was built from.
   bool is_current(Storage&, std::string_view root) const;
+  // Whether build() puts the new index in place at once or leaves it staged for install().
+  enum class Install { now, staged };
+
   // Scans <root> recursively for .mp3, reads tags, writes the index. `progress(done)` is
-  // called every 100 files; returning false stops (the old index stays). With install == false
+  // called every 100 files; returning false stops (the old index stays). With Install::staged
   // the new index is only staged at <root>/.prism-library.new: FatFS cannot replace a file that
   // is open, so the caller closes the library it has before calling install().
   static bool build(Storage&, std::string_view root, const std::function<bool(int)>& progress,
-                    bool install = true);
+                    Install install = Install::now);
   // Moves the staged index over the live one; false when nothing is staged.
   static bool install(Storage&, std::string_view root);
 

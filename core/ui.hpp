@@ -57,6 +57,9 @@ public:
   // A list row: its label, and a value shown right-aligned (a setting's, an album's artist).
   struct Row {
     std::string label, value;
+    // A Folders row that opens rather than plays. The label keeps its trailing '/' because that is
+    // what the user reads; this flag is what the code decides on.
+    bool folder = false;
   };
   // A screen on the stack, with its own selection so Menu comes back to where it was.
   struct Place {
@@ -93,6 +96,13 @@ public:
   // clears it.
   void set_library_status(std::string);
   const std::string& library_status() const { return library_status_; }
+  // Settings → Bluetooth's value: what the output is doing ("Connected to …", "Scanning…"). A board
+  // reports it whenever it changes; the setter repaints, so no caller has to.
+  void set_bluetooth_text(std::string text) {
+    if (settings.bluetooth == text) return;
+    settings.bluetooth = std::move(text);
+    changed();
+  }
   // Settings → Output cycles `settings.outputs`; `settings.output` is what the next start uses,
   // never the running output. The board saves it from here.
   void on_output_changed(std::function<void(std::size_t)> handler) {
@@ -146,6 +156,11 @@ private:
   void draw_menu(const Pen&) const;
   void draw_list(const Pen&) const;
   void draw_now_playing(const Pen&) const;
+  // Now Playing's parts, drawn in this order.
+  void draw_cover(const Pen&) const;
+  void draw_track_text(const Pen&, const Player::Status&, const TrackRow&, std::size_t size) const;
+  void draw_progress(const Pen&, const Player::Status&) const;
+  void draw_volume(const Pen&) const;
   std::vector<Row> visible_rows() const;
   void fit_rows(float height);
 

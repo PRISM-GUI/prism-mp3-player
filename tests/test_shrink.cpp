@@ -5,6 +5,7 @@
 #include <prism/render/draw_list.hpp>
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 using player::shrink_rgb888;
@@ -32,7 +33,8 @@ std::uint32_t rgba_at(const prism::render::Image& img, int x, int y) {
 }  // namespace
 
 TEST_CASE("a large square picture comes down to max_side, its halves kept") {
-  const auto img = shrink_rgb888(halves(600, 600, 600 * 3), 600, 600, 600 * 3, 150);
+  const auto rgb = halves(600, 600, 600 * 3);
+  const auto img = shrink_rgb888({rgb, 600, 600, 600 * 3}, 150);
   REQUIRE(img);
   CHECK(img->width() == 150);
   CHECK(img->height() == 150);
@@ -41,7 +43,8 @@ TEST_CASE("a large square picture comes down to max_side, its halves kept") {
 }
 
 TEST_CASE("a wide picture keeps its aspect ratio, and row padding is skipped") {
-  const auto img = shrink_rgb888(halves(400, 200, 400 * 3 + 16), 400, 200, 400 * 3 + 16, 100);
+  const auto rgb = halves(400, 200, 400 * 3 + 16);
+  const auto img = shrink_rgb888({rgb, 400, 200, 400 * 3 + 16}, 100);
   REQUIRE(img);
   CHECK(img->width() == 100);
   CHECK(img->height() == 50);
@@ -49,21 +52,24 @@ TEST_CASE("a wide picture keeps its aspect ratio, and row padding is skipped") {
 }
 
 TEST_CASE("pixels across a block boundary are averaged") {
-  const auto img = shrink_rgb888(halves(4, 2, 12), 4, 2, 12, 1);
+  const auto rgb = halves(4, 2, 12);
+  const auto img = shrink_rgb888({rgb, 4, 2, 12}, 1);
   REQUIRE(img);
   CHECK(img->width() == 1);
   CHECK(rgba_at(*img, 0, 0) == 0x7F007FFFu);  // half red, half blue
 }
 
 TEST_CASE("a picture already small enough keeps its size") {
-  const auto img = shrink_rgb888(halves(80, 60, 240), 80, 60, 240, 150);
+  const auto rgb = halves(80, 60, 240);
+  const auto img = shrink_rgb888({rgb, 80, 60, 240}, 150);
   REQUIRE(img);
   CHECK(img->width() == 80);
   CHECK(img->height() == 60);
 }
 
 TEST_CASE("a bad size gives null") {
-  CHECK_FALSE(shrink_rgb888({}, 0, 10, 0, 150));
-  CHECK_FALSE(shrink_rgb888(halves(10, 10, 30), 10, 10, 30, 0));
-  CHECK_FALSE(shrink_rgb888(halves(10, 10, 30), 10, 11, 30, 150));  // fewer bytes than the size says
+  const auto rgb = halves(10, 10, 30);
+  CHECK_FALSE(shrink_rgb888({std::span<const std::uint8_t>{}, 0, 10, 0}, 150));
+  CHECK_FALSE(shrink_rgb888({rgb, 10, 10, 30}, 0));
+  CHECK_FALSE(shrink_rgb888({rgb, 10, 11, 30}, 150));  // fewer bytes than the size says
 }

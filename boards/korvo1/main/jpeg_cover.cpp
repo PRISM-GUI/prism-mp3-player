@@ -58,8 +58,9 @@ std::shared_ptr<const prism::render::Image> decode_jpeg_cover(std::span<const st
   std::uint32_t written = 0;
   if (jpeg_decoder_process(engine(), &cfg, bits, bytes, out.data, static_cast<std::uint32_t>(out.size), &written) != ESP_OK)
     return nullptr;
-  return shrink_rgb888({out.data, out.size}, static_cast<int>(info.width), static_cast<int>(info.height),
-                       static_cast<int>(stride), max_side);
+  return shrink_rgb888({{out.data, out.size}, static_cast<int>(info.width),
+                        static_cast<int>(info.height), static_cast<int>(stride)},
+                       max_side);
 }
 
 }  // namespace player
